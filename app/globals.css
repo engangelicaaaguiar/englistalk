@@ -2,14 +2,49 @@
 @tailwind components;
 @tailwind utilities;
 
-html, body, #__next {
-  height: 100%;
+:root {
+  --background: #0B1020;
+  --foreground: #ffffff;
 }
 
 body {
-  @apply bg-slate-50 text-slate-900 antialiased;
+  color: var(--foreground);
+  background: var(--background);
+  font-family: 'Inter', sans-serif;
+  overflow-x: hidden;
 }
 
-.chat-scroll {
-  scrollbar-width: thin;
+/* Animação de Shimmer (Brilho passando no badge) */
+@keyframes shimmer {
+  from { background-position: 0 0; }
+  to { background-position: -200% 0; }
+}
+.animate-shimmer {
+  background: linear-gradient(to right, 
+    rgba(255,255,255,0) 0%, 
+    rgba(255,255,255,0.1) 50%, 
+    rgba(255,255,255,0) 100%);
+  background-size: 200% 100%;
+  animation: shimmer 3s infinite linear;
+}
+
+/* Animação de Flutuar Suave */
+@keyframes float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-10px); }
+}
+.animate-float {
+  animation: float 6s ease-in-out infinite;
+}
+
+/* Scrollbar invisível mas funcional */
+::-webkit-scrollbar {
+  width: 8px;
+}
+::-webkit-scrollbar-track {
+  background: #0B1020; 
+}
+::-webkit-scrollbar-thumb {
+  background: #1e293b; 
+  border-radius: 4px;
 }

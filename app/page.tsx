@@ -2,22 +2,27 @@
 
 import { useChat } from 'ai/react';
 import { useEffect, useState, useRef } from 'react';
-import { Mic, MicOff, Wifi, WifiOff, X, Sparkles, Monitor, Smartphone, ChevronRight } from 'lucide-react';
+import { Mic, X, Zap, ShieldCheck, Sparkles, ChevronRight, Play, BrainCircuit, Headphones, Globe } from 'lucide-react';
 
-export default function App() {
+// CORES DA MARCA (Hardcoded para garantir fidelidade)
+const COLORS = {
+  navy: '#0B1020',
+  navyLight: '#0E1629',
+  purple: '#7C6CFF',
+  blue: '#4FD1FF',
+  green: '#3EE6B5'
+};
+
+export default function TalkenApp() {
   // --- ESTADOS ---
   const [view, setView] = useState<'landing' | 'app'>('landing');
   const [isListening, setIsListening] = useState(false);
   const [status, setStatus] = useState("Pronto");
-  const [debugLog, setDebugLog] = useState("");
-
-  // --- HOOK DA IA ---
+  
+  // Hook AI
   const { messages, append, isLoading } = useChat({
     api: '/api/chat',
-    onError: (err) => {
-      setStatus("Erro API");
-      setDebugLog(`API Error: ${err.message}. Verifique a chave no .env.local`);
-    },
+    onError: () => setStatus("Erro de Conexão"),
     onFinish: () => {
       setStatus("Sua vez");
       restartListening();
@@ -36,7 +41,7 @@ export default function App() {
       const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
 
       if (!SpeechRecognition) {
-        setDebugLog("Navegador incompatível (Use Chrome/Edge).");
+        setStatus("Navegador incompatível");
         return;
       }
 
@@ -45,58 +50,30 @@ export default function App() {
       recognition.interimResults = true;
       recognition.lang = 'en-US';
 
-      recognition.onstart = () => {
-        setIsListening(true);
-        setStatus("Ouvindo...");
-      };
+      recognition.onstart = () => { setIsListening(true); setStatus("Ouvindo..."); };
+      recognition.onend = () => { setIsListening(false); };
       
-      recognition.onend = () => {
-        setIsListening(false);
-      };
-
-      recognition.onerror = (event: any) => {
-        // Ignora erros comuns de 'no-speech' para não poluir a tela
-        if (event.error !== 'no-speech') {
-             setDebugLog(`Mic: ${event.error}`);
-        }
-        setIsListening(false);
-      };
-
       recognition.onresult = (event: any) => {
         const transcript = Array.from(event.results)
           .map((result: any) => result[0])
           .map((result: any) => result.transcript)
           .join('');
 
-        // Se for Desktop, mostra o texto enquanto fala. Se for mobile, simplifica.
-        setStatus(window.innerWidth > 768 ? `Ouvindo: ${transcript}` : "Ouvindo...");
-
         if (event.results[0].isFinal) {
            clearTimeout(silenceTimerRef.current);
-           setStatus("Analisando...");
-           
+           setStatus("Pensando...");
            silenceTimerRef.current = setTimeout(() => {
              recognition.stop();
-             setStatus("Enviando...");
              append({ role: 'user', content: transcript });
-           }, 1200);
+           }, 800);
         }
       };
       recognitionRef.current = recognition;
     }
   }, [view, append]);
 
-  const restartListening = () => {
-    try { recognitionRef.current?.start(); } catch(e) {}
-  };
-
-  const toggleListening = () => {
-    if (isListening) {
-      recognitionRef.current?.stop();
-    } else {
-      restartListening();
-    }
-  }
+  const restartListening = () => { try { recognitionRef.current?.start(); } catch(e) {} };
+  const toggleListening = () => isListening ? recognitionRef.current?.stop() : restartListening();
 
   // --- TTS (Fala) ---
   useEffect(() => {
@@ -109,175 +86,206 @@ export default function App() {
   const speak = (text: string) => {
     if (!synthRef.current) return;
     synthRef.current.cancel();
-
-    const cleanText = text.replace(/[*#]/g, '');
-    const utterance = new SpeechSynthesisUtterance(cleanText);
+    const utterance = new SpeechSynthesisUtterance(text.replace(/[*#]/g, ''));
     utterance.lang = 'en-US';
-    
     const voices = synthRef.current.getVoices();
     const bestVoice = voices.find(v => v.name.includes('Google US English')) || voices[0];
     if (bestVoice) utterance.voice = bestVoice;
-
-    utterance.onstart = () => setStatus("IA Falando...");
-    utterance.onend = () => {
-      setStatus("Sua vez");
-      restartListening();
-    };
-
+    utterance.onstart = () => setStatus("Falando...");
+    utterance.onend = () => { setStatus("Sua vez"); restartListening(); };
     synthRef.current.speak(utterance);
   };
 
-  // --- UI RENDER ---
+  // --- UI COMPONENTS ---
 
-  // 1. LANDING PAGE (Desktop & Mobile Otimizada)
+  const Badge = ({ children }: { children: React.ReactNode }) => (
+    <div className="relative overflow-hidden inline-flex items-center gap-2 px-3 py-1 rounded-full bg-[#0E1629] border border-white/10 text-[#4FD1FF] text-xs font-bold uppercase tracking-widest mb-8">
+      <div className="absolute inset-0 animate-shimmer opacity-20"></div>
+      <span className="relative z-10 flex items-center gap-2">{children}</span>
+    </div>
+  );
+
+  const FeatureCard = ({ icon: Icon, title, desc }: any) => (
+    <div className="group p-6 rounded-2xl bg-[#0E1629]/50 border border-white/5 hover:border-[#7C6CFF]/30 hover:bg-[#0E1629] transition-all duration-300 hover:-translate-y-1">
+      <div className="w-12 h-12 rounded-lg bg-[#0B1020] border border-white/10 flex items-center justify-center mb-4 text-[#7C6CFF] group-hover:text-[#4FD1FF] transition-colors">
+        <Icon size={24} />
+      </div>
+      <h3 className="text-white font-semibold text-lg mb-2">{title}</h3>
+      <p className="text-slate-400 text-sm leading-relaxed">{desc}</p>
+    </div>
+  );
+
+  // --- VIEWS ---
+
   if (view === 'landing') {
     return (
-      <div className="min-h-screen bg-slate-950 text-white font-sans selection:bg-indigo-500 overflow-x-hidden">
+      <div className="min-h-screen bg-[#0B1020] text-white selection:bg-[#7C6CFF]/30 font-sans">
+        {/* Glows de Fundo (Ambiente) */}
+        <div className="fixed inset-0 pointer-events-none">
+          <div className="absolute top-[-20%] left-[20%] w-[500px] h-[500px] bg-[#7C6CFF]/10 rounded-full blur-[120px]" />
+          <div className="absolute bottom-[-10%] right-[-10%] w-[600px] h-[600px] bg-[#4FD1FF]/5 rounded-full blur-[120px]" />
+        </div>
+
         {/* Navbar */}
-        <nav className="max-w-7xl mx-auto p-6 flex justify-between items-center">
-          <div className="flex items-center gap-2 font-bold text-xl tracking-tight">
-            <Sparkles className="text-indigo-500" /> TalkNative
+        <nav className="relative z-20 max-w-6xl mx-auto px-6 py-6 flex justify-between items-center">
+          <div className="flex items-center gap-2 text-xl font-bold tracking-tight">
+            <div className="w-8 h-8 rounded-full bg-gradient-to-tr from-[#7C6CFF] to-[#4FD1FF] flex items-center justify-center">
+              <Zap size={16} className="text-white" fill="currentColor" />
+            </div>
+            Talken
           </div>
-          <button onClick={() => setView('app')} className="hidden md:block px-6 py-2 rounded-full border border-white/20 hover:bg-white/10 transition-all text-sm font-medium">
-            Entrar
+          <button onClick={() => setView('app')} className="text-sm font-medium text-slate-300 hover:text-white transition-colors">
+            Login
           </button>
         </nav>
 
         {/* Hero Section */}
-        <main className="max-w-7xl mx-auto px-6 pt-10 md:pt-20 flex flex-col md:flex-row items-center gap-12">
+        <main className="relative z-10 pt-20 pb-32 px-6 max-w-4xl mx-auto text-center">
           
-          {/* Texto (Esquerda) */}
-          <div className="flex-1 text-center md:text-left z-10">
-            <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-indigo-900/30 border border-indigo-500/30 text-indigo-300 text-xs font-bold uppercase tracking-widest mb-8">
-              <span className="w-2 h-2 rounded-full bg-indigo-500 animate-pulse"></span>
-              Voice Engine 2.0 Live
-            </div>
-            
-            <h1 className="text-5xl md:text-7xl lg:text-8xl font-extrabold tracking-tighter mb-6 leading-[1.1]">
-              Fluência <br/>
-              <span className="text-transparent bg-clip-text bg-gradient-to-r from-indigo-400 to-purple-400">Instantânea.</span>
-            </h1>
-            
-            <p className="text-lg md:text-2xl text-slate-400 mb-10 max-w-xl mx-auto md:mx-0 leading-relaxed">
-              Pratique inglês conversando com uma IA nativa. Sem digitar, sem agendar. Apenas fale.
-            </p>
+          <Badge>
+            <Sparkles size={12} /> Nova Engine 2.5
+          </Badge>
 
+          <h1 className="text-5xl md:text-7xl font-bold tracking-tight mb-8 leading-[1.1]">
+            Fluência em Inglês.<br />
+            <span className="text-transparent bg-clip-text bg-gradient-to-r from-white via-white to-slate-400">
+              No seu ritmo.
+            </span>
+          </h1>
+          
+          <p className="text-lg md:text-xl text-slate-400 mb-12 max-w-2xl mx-auto leading-relaxed font-light">
+            Converse em inglês com uma IA treinada para ouvir, compreender e corrigir com empatia. 
+            <span className="text-[#3EE6B5]"> Ambiente seguro. Sem julgamentos.</span>
+          </p>
+
+          <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
             <button 
               onClick={() => setView('app')}
-              className="group relative inline-flex items-center gap-3 px-8 py-4 bg-white text-slate-950 rounded-full font-bold text-lg hover:bg-indigo-50 transition-all shadow-[0_0_40px_-10px_rgba(255,255,255,0.3)] hover:shadow-[0_0_60px_-10px_rgba(255,255,255,0.5)]"
+              className="relative group px-8 py-4 rounded-full bg-gradient-to-r from-[#7C6CFF] to-[#4FD1FF] text-white font-bold text-lg shadow-[0_0_20px_-5px_rgba(124,108,255,0.4)] hover:shadow-[0_0_30px_-5px_rgba(124,108,255,0.6)] transition-all hover:scale-[1.02]"
             >
-              Iniciar Sessão Agora
-              <ChevronRight className="group-hover:translate-x-1 transition-transform" />
+              Começar Conversa Gratuita
+            </button>
+            <button className="px-8 py-4 rounded-full border border-white/10 hover:bg-white/5 text-slate-300 hover:text-white transition-all font-medium flex items-center gap-2">
+              <Play size={18} /> Ver Demo
             </button>
           </div>
 
-          {/* Visual (Direita - Desktop Only) */}
-          <div className="flex-1 relative hidden md:flex justify-center">
-            <div className="relative w-96 h-96 bg-gradient-to-tr from-indigo-600 to-purple-600 rounded-full blur-[100px] opacity-50 animate-pulse"></div>
-            <div className="absolute inset-0 flex items-center justify-center">
-               <div className="w-80 h-80 rounded-[3rem] bg-slate-900/50 backdrop-blur-xl border border-white/10 shadow-2xl flex items-center justify-center transform rotate-6 hover:rotate-0 transition-all duration-700">
-                  <div className="text-center">
-                    <div className="w-20 h-20 bg-indigo-500 rounded-full mx-auto mb-6 flex items-center justify-center shadow-lg">
-                      <Mic className="text-white w-10 h-10" />
-                    </div>
-                    <p className="text-2xl font-bold">"Hello!"</p>
-                    <p className="text-slate-400 mt-2">Listening...</p>
-                  </div>
-               </div>
-            </div>
+          <div className="mt-16 pt-8 border-t border-white/5 flex flex-wrap justify-center gap-8 md:gap-16 opacity-40 grayscale hover:grayscale-0 transition-all duration-700">
+            {['TechCrunch', 'Forbes', 'ProductHunt', 'Wired'].map(brand => (
+              <span key={brand} className="text-lg font-semibold font-serif">{brand}</span>
+            ))}
           </div>
         </main>
+
+        {/* Features Section */}
+        <section className="relative z-10 max-w-6xl mx-auto px-6 pb-24">
+          <div className="grid md:grid-cols-3 gap-6">
+            <FeatureCard 
+              icon={BrainCircuit}
+              title="Inteligência Emocional"
+              desc="Nossa IA detecta hesitação e nervosismo, adaptando a velocidade e o vocabulário para te deixar confortável."
+            />
+            <FeatureCard 
+              icon={ShieldCheck}
+              title="Zona de Confiança"
+              desc="Erre à vontade. Aqui não existe 'passar vergonha'. O feedback é privado, gentil e focado no progresso."
+            />
+            <FeatureCard 
+              icon={Headphones}
+              title="Imersão Total"
+              desc="Esqueça textos. Treine seu ouvido e sua fala com vozes neurais indistinguíveis de humanos nativos."
+            />
+          </div>
+        </section>
       </div>
     );
   }
 
-  // 2. APP INTERFACE (HÍBRIDA: Desktop + Mobile)
+  // 2. APP VIEW (IMMERSIVE)
   return (
-    <div className="h-screen w-screen bg-black text-white flex flex-col relative overflow-hidden font-sans">
+    <div className="h-[100dvh] w-screen bg-[#0B1020] text-white flex flex-col relative overflow-hidden font-sans">
       
-      {/* Background Dinâmico */}
-      <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,_var(--tw-gradient-stops))] from-indigo-900/10 via-black to-black -z-10" />
+      {/* Background Sutil */}
+      <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,_var(--tw-gradient-stops))] from-[#0E1629] via-[#0B1020] to-[#0B1020]" />
 
-      {/* HEADER */}
-      <div className="w-full p-6 flex justify-between items-center z-20">
-        <button onClick={() => setView('landing')} className="p-3 rounded-full bg-white/5 hover:bg-white/10 transition-colors">
-          <X size={24} className="text-slate-400" />
+      {/* Header */}
+      <div className="relative z-20 px-6 py-4 flex justify-between items-center bg-gradient-to-b from-[#0B1020] to-transparent">
+        <button onClick={() => setView('landing')} className="p-2 rounded-full bg-white/5 hover:bg-white/10 text-slate-400 hover:text-white transition-colors">
+          <X size={20} />
         </button>
-
-        {/* Status Bar Centralizada no Desktop */}
-        <div className="hidden md:flex items-center gap-4 bg-white/5 px-6 py-2 rounded-full border border-white/5 backdrop-blur-md">
-           <div className={`w-2 h-2 rounded-full ${status.includes('Erro') ? 'bg-red-500' : 'bg-green-500 animate-pulse'}`}></div>
-           <span className="text-sm font-medium text-slate-300 uppercase tracking-widest">{status}</span>
+        
+        <div className="flex items-center gap-2 px-3 py-1 rounded-full bg-[#0E1629] border border-white/5 backdrop-blur-md">
+           <div className={`w-1.5 h-1.5 rounded-full transition-colors duration-500 
+             ${status === 'Erro' ? 'bg-red-500' : 
+               isListening ? 'bg-[#3EE6B5] animate-pulse' : 
+               isLoading ? 'bg-[#7C6CFF] animate-bounce' : 'bg-slate-500'}`} 
+           />
+           <span className="text-xs font-medium tracking-wide text-slate-300 uppercase">{status}</span>
         </div>
 
-        {/* Ícone de Dispositivo (Debug Visual) */}
-        <div className="text-slate-600 hidden md:block">
-           <Monitor size={20} />
-        </div>
+        <button className="p-2 text-slate-400 hover:text-white opacity-50 cursor-not-allowed">
+           <Globe size={20} />
+        </button>
       </div>
 
-      {/* ÁREA CENTRAL - O ORBE RESPONSIVO */}
-      <div className="flex-1 flex flex-col items-center justify-center relative w-full">
-        
-        <div 
-          onClick={toggleListening}
-          className="relative cursor-pointer group"
-        >
-          {/* Glow Gigante no Desktop, Menor no Mobile */}
-          <div className={`absolute inset-0 rounded-full transition-all duration-700 
-            ${isLoading ? 'bg-purple-600/30 blur-[60px] md:blur-[120px] scale-150' : 
-              isListening ? 'bg-indigo-500/30 blur-[60px] md:blur-[120px] scale-125' : 
-              'bg-slate-800/10 blur-[40px] scale-100'}`} 
+      {/* ÁREA CENTRAL - ORBE ORGÂNICO */}
+      <div className="flex-1 flex flex-col items-center justify-center relative w-full z-10">
+        <div onClick={toggleListening} className="relative cursor-pointer group touch-none">
+          
+          {/* Aura Respirante */}
+          <div className={`absolute inset-0 rounded-full transition-all duration-1000 blur-[80px]
+            ${isLoading ? 'bg-[#7C6CFF]/30 scale-125' : 
+              isListening ? 'bg-[#3EE6B5]/20 scale-110' : 
+              'bg-[#4FD1FF]/5 scale-100'}`} 
           />
           
-          {/* O Orbe Físico - Responsivo via Tailwind (w-48 mobile vs w-96 desktop) */}
-          <div className={`relative w-48 h-48 md:w-80 md:h-80 rounded-full backdrop-blur-2xl border flex items-center justify-center transition-all duration-500 shadow-2xl
+          {/* O Orbe Físico */}
+          <div className={`relative w-48 h-48 md:w-64 md:h-64 rounded-full border transition-all duration-700 flex items-center justify-center shadow-2xl backdrop-blur-3xl
              ${isListening 
-               ? 'border-indigo-500/50 bg-indigo-900/10 scale-110 md:scale-105' 
-               : 'border-white/10 bg-black/40 hover:border-white/30 hover:bg-white/5'}
-          `}>
+               ? 'border-[#3EE6B5]/50 bg-[#3EE6B5]/10 scale-105' 
+               : isLoading 
+                 ? 'border-[#7C6CFF]/50 bg-[#7C6CFF]/10'
+                 : 'border-white/10 bg-white/5 hover:border-white/20'}`}
+          >
+            {/* Núcleo do Orbe */}
             {isLoading ? (
-              <Sparkles className="animate-spin text-purple-400 w-12 h-12 md:w-20 md:h-20" />
+               <div className="absolute inset-4 rounded-full border-t-2 border-[#7C6CFF] animate-spin opacity-60"></div>
             ) : isListening ? (
-              // Ondas de Som Animadas
-              <div className="flex gap-1.5 md:gap-3 items-center h-12 md:h-24">
-                 {[...Array(5)].map((_, i) => (
-                   <div key={i} className="w-1.5 md:w-3 bg-indigo-400 rounded-full animate-bounce" 
-                        style={{ animationDuration: `${0.4 + (i * 0.1)}s`, height: '100%' }}></div>
-                 ))}
-              </div>
+               <div className="flex gap-1 items-center h-16">
+                  {[...Array(5)].map((_, i) => (
+                    <div key={i} className="w-1.5 bg-[#3EE6B5] rounded-full animate-[bounce_1s_infinite]" 
+                         style={{ animationDelay: `${i * 0.1}s`, height: `${30 + Math.random() * 50}%` }}></div>
+                  ))}
+               </div>
             ) : (
-              <MicOff className="text-slate-600 w-10 h-10 md:w-16 md:h-16 group-hover:text-white transition-colors" />
+               <Mic size={32} className="text-slate-500 group-hover:text-white transition-colors" />
             )}
           </div>
-
-          {/* Dica de Hover (Só aparece no Desktop) */}
-          <p className="hidden md:block absolute -bottom-12 left-0 right-0 text-center text-sm text-slate-500 uppercase tracking-[0.2em] opacity-0 group-hover:opacity-100 transition-opacity">
-            {isListening ? "Clique para Pausar" : "Clique para Falar"}
+          
+          <p className="mt-12 text-center text-xs font-bold tracking-[0.2em] text-slate-600 uppercase group-hover:text-[#4FD1FF] transition-colors">
+             {isListening ? "Toque para Pausar" : "Toque para Falar"}
           </p>
         </div>
       </div>
 
-      {/* ÁREA DE LEGENDAS (Responsiva) */}
-      <div className="w-full min-h-[20vh] md:min-h-[25vh] bg-gradient-to-t from-black via-black/80 to-transparent p-6 md:p-12 flex flex-col justify-end items-center text-center z-20">
-        
-        {/* Debug Log (Erro apenas) */}
-        {debugLog && (
-           <div className="mb-4 text-xs text-red-400 bg-red-900/20 px-3 py-1 rounded border border-red-500/20">
-             {debugLog}
-           </div>
-        )}
-
-        <div className="max-w-4xl">
-          <p className={`text-2xl md:text-4xl lg:text-5xl font-light leading-tight transition-all duration-500
-            ${isLoading ? 'opacity-50 blur-sm' : 'opacity-100'}`}>
-            {messages.length > 0 
-              ? messages[messages.length - 1].role === 'assistant' 
-                 ? <span dangerouslySetInnerHTML={{ __html: messages[messages.length - 1].content.replace(/\*\*(.*?)\*\*/g, '<span class="text-indigo-400 font-normal">$1</span>') }} />
-                 : <span className="text-slate-500 italic">"{messages[messages.length - 1].content}"</span>
-              : <span className="text-slate-600">Diga "Hello" para começar.</span>
-            }
-          </p>
+      {/* LEGENDAS (Bottom Sheet Elegante) */}
+      <div className="relative z-20 w-full min-h-[25vh] bg-gradient-to-t from-[#0B1020] via-[#0B1020]/90 to-transparent flex flex-col justify-end items-center pb-12 px-6">
+        <div className="max-w-2xl w-full text-center space-y-4">
+           {messages.length > 0 ? (
+             <div className={`transition-all duration-500 ${isLoading ? 'opacity-50 blur-[1px]' : 'opacity-100'}`}>
+                {messages[messages.length - 1].role === 'assistant' ? (
+                   <p className="text-xl md:text-2xl font-light leading-relaxed text-slate-100"
+                      dangerouslySetInnerHTML={{ 
+                        __html: messages[messages.length - 1].content.replace(/\*\*(.*?)\*\*/g, '<span class="text-[#3EE6B5] font-normal">$1</span>') 
+                      }} 
+                   />
+                ) : (
+                   <p className="text-lg md:text-xl text-slate-500 italic">"{messages[messages.length - 1].content}"</p>
+                )}
+             </div>
+           ) : (
+             <p className="text-slate-500 text-sm font-medium animate-pulse">Diga "Hello" para começar sua jornada.</p>
+           )}
         </div>
       </div>
     </div>
