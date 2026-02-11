@@ -1,2 +1,7 @@
-node_modules.env.local
+node_modules
+.env.local
 .env*.local
+.next
+.netlify
+dist
+build
