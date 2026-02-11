@@ -2,6 +2,8 @@ node_modules
 .env.local
 .env*.local
 .next
-.netlify
+.netlify/
+.netlify/**
 dist
 build
+*.log
