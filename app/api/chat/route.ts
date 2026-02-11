@@ -1,22 +1,33 @@
+import { google } from '@ai-sdk/google';
+import { streamText } from 'ai';
+
+// Isso é CRUCIAL para o Netlify. Se tirar, quebra.
 export const runtime = 'edge';
 
 export async function POST(req: Request) {
   try {
+    // 1. Verificar se a chave existe no servidor
+    if (!process.env.GOOGLE_GENERATIVE_AI_API_KEY) {
+      console.error("❌ ERRO CRÍTICO: Chave da API não encontrada!");
+      return new Response("Erro: Chave de API não configurada no servidor.", { status: 500 });
+    }
+
+    // 2. Ler a mensagem
     const { messages } = await req.json();
-    const last = messages?.slice(-1)[0];
-    const userText = last?.content || '';
+    console.log("📩 Recebi mensagem do frontend:", messages[messages.length - 1].content);
 
-    // Simple local responder as a safe fallback for the MVP.
-    // - Keeps answers short, ends with a question.
-    // - Wraps a naive "correction" in **bold** when it detects a simple pattern.
-    let corrected = userText;
-    // naive correction example: replace common wrong "goed" -> "went"
-    corrected = corrected.replace(/\bgoed\b/gi, '**went**');
+    // 3. Chamar o Gemini
+    const result = await streamText({
+      model: google('gemini-1.5-flash'),
+      system: `You are Talken AI, a friendly English tutor. Keep answers short.`,
+      messages,
+    });
 
-    const reply = `I heard: ${corrected}. Would you like another example?`;
+    // 4. Devolver resposta
+    return result.toDataStreamResponse();
 
-    return new Response(JSON.stringify({ output: reply }), { status: 200, headers: { 'Content-Type': 'application/json' } });
-  } catch (err: any) {
-    return new Response(JSON.stringify({ error: String(err) }), { status: 500, headers: { 'Content-Type': 'application/json' } });
+  } catch (error: any) {
+    console.error("🔥 ERRO NA API:", error);
+    return new Response(`Erro no servidor: ${error.message}`, { status: 500 });
   }
 }
