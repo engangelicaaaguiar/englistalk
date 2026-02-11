@@ -1,48 +1,61 @@
-import { streamText } from 'ai';
+import { streamText, generateText } from 'ai';
+import { createOpenAI } from '@ai-sdk/openai';
 
-// Isso é CRUCIAL para o Netlify. Se tirar, quebra.
+// Configuração da Groq (Compatível com OpenAI)
+const groq = createOpenAI({
+  baseURL: 'https://api.groq.com/openai/v1',
+  apiKey: process.env.GROQ_API_KEY,
+});
+
+// Edge Runtime para velocidade máxima
 export const runtime = 'edge';
 
 export async function POST(req: Request) {
   try {
-    // 1. Verificar se a chave existe no servidor
-    if (!process.env.GOOGLE_GENERATIVE_AI_API_KEY) {
-      console.error("❌ ERRO CRÍTICO: Chave da API não encontrada!");
-    } else {
-      console.log("✅ Chave da API encontrada!");
+    // Validação de segurança simples
+    if (!process.env.GROQ_API_KEY) {
+      return new Response("Erro: Chave GROQ_API_KEY não encontrada.", { status: 500 });
     }
 
-    // 2. Ler a mensagem
     const { messages } = await req.json();
-    const userMessage = messages[messages.length - 1]?.content || '';
-    console.log("📩 Recebi mensagem do frontend:", userMessage);
 
-    // 3. Responder com fallback local (diagnóstico)
-    const reply = `I heard: "${userMessage}". Would you like to try again?`;
-    console.log("📤 Enviando resposta:", reply);
+    // O Prompt do Professor
+    const systemPrompt = `
+      You are Talken AI, an energetic American English Tutor.
+      Role: Help the user practice speaking. 
+      Rules:
+      1. Concise responses (max 2 sentences).
+      2. Correct grammar mistakes using Markdown bolding (e.g., "**I went**").
+      3. Always end with a simple question to keep the conversation flowing.
+    `;
 
-    // Streaming response para manter compatibilidade com useChat
-    const encoder = new TextEncoder();
-    const chunks = [
-      `0:["${reply}"]\n`,
-      'd:[[["text","I heard: \\"${userMessage}\\". Would you like to try again?"]],null]\n',
-    ];
-
-    return new Response(
-      new ReadableStream({
-        async start(controller) {
-          for (const chunk of chunks) {
-            controller.enqueue(encoder.encode(chunk));
-            await new Promise(r => setTimeout(r, 50));
-          }
-          controller.close();
-        },
+    // Usar fetch direto à API Groq (compatível com OpenAI)
+    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${process.env.GROQ_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'llama-3.1-8b-instant',
+        messages: [
+          { role: 'system', content: systemPrompt },
+          ...messages,
+        ],
+        stream: true,
+        temperature: 0.7,
+        max_tokens: 150,
       }),
-      { 
-        headers: { 'Content-Type': 'text/plain; charset=utf-8' },
-        status: 200 
-      }
-    );
+    });
+
+    // Passar o stream diretamente
+    return new Response(response.body, {
+      headers: {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+      },
+    });
 
   } catch (error: any) {
     console.error("🔥 ERRO NA API:", error);
