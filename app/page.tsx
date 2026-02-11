@@ -2,22 +2,15 @@
 
 import { useChat } from 'ai/react';
 import { useEffect, useState, useRef } from 'react';
-import { Mic, X, Zap, ShieldCheck, Sparkles, ChevronRight, Play, BrainCircuit, Headphones, Globe } from 'lucide-react';
-
-// CORES DA MARCA (Hardcoded para garantir fidelidade)
-const COLORS = {
-  navy: '#0B1020',
-  navyLight: '#0E1629',
-  purple: '#7C6CFF',
-  blue: '#4FD1FF',
-  green: '#3EE6B5'
-};
+import { Mic, MicOff, Zap, X, ShieldCheck, Sparkles, ChevronRight, Play, BrainCircuit, Headphones, Globe, Mail, Lock, ArrowLeft, CheckCircle2 } from 'lucide-react';
 
 export default function TalkenApp() {
-  // --- ESTADOS ---
-  const [view, setView] = useState<'landing' | 'app'>('landing');
+  const [view, setView] = useState<'landing' | 'login' | 'app'>('landing');
   const [isListening, setIsListening] = useState(false);
   const [status, setStatus] = useState("Pronto");
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [isLoadingLogin, setIsLoadingLogin] = useState(false); // Simula loading do login
   
   // Hook AI
   const { messages, append, isLoading } = useChat({
@@ -33,17 +26,14 @@ export default function TalkenApp() {
   const silenceTimerRef = useRef<any>(null);
   const synthRef = useRef<SpeechSynthesis | null>(null);
 
-  // --- LÓGICA DE VOZ (Universal) ---
+  // --- LÓGICA DE VOZ (Engine) ---
   useEffect(() => {
     if (typeof window !== 'undefined' && view === 'app') {
       synthRef.current = window.speechSynthesis;
       // @ts-ignore
       const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
 
-      if (!SpeechRecognition) {
-        setStatus("Navegador incompatível");
-        return;
-      }
+      if (!SpeechRecognition) return;
 
       const recognition = new SpeechRecognition();
       recognition.continuous = true; 
@@ -75,12 +65,10 @@ export default function TalkenApp() {
   const restartListening = () => { try { recognitionRef.current?.start(); } catch(e) {} };
   const toggleListening = () => isListening ? recognitionRef.current?.stop() : restartListening();
 
-  // --- TTS (Fala) ---
+  // TTS
   useEffect(() => {
-    const lastMessage = messages[messages.length - 1];
-    if (lastMessage?.role === 'assistant' && !isLoading) {
-      speak(lastMessage.content);
-    }
+    const lastMsg = messages[messages.length - 1];
+    if (lastMsg?.role === 'assistant' && !isLoading) speak(lastMsg.content);
   }, [messages, isLoading]);
 
   const speak = (text: string) => {
@@ -96,12 +84,37 @@ export default function TalkenApp() {
     synthRef.current.speak(utterance);
   };
 
-  // --- UI COMPONENTS ---
+  const handleLogin = (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsLoadingLogin(true);
+    // Simula delay de rede para parecer real
+    setTimeout(() => {
+      setIsLoadingLogin(false);
+      setView('app');
+    }, 1500);
+  };
+
+  // --- COMPONENTS ---
 
   const Badge = ({ children }: { children: React.ReactNode }) => (
     <div className="relative overflow-hidden inline-flex items-center gap-2 px-3 py-1 rounded-full bg-[#0E1629] border border-white/10 text-[#4FD1FF] text-xs font-bold uppercase tracking-widest mb-8">
       <div className="absolute inset-0 animate-shimmer opacity-20"></div>
       <span className="relative z-10 flex items-center gap-2">{children}</span>
+    </div>
+  );
+
+  const InputField = ({ icon: Icon, type, placeholder, value, onChange }: any) => (
+    <div className="relative group">
+      <div className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-500 group-focus-within:text-[#4FD1FF] transition-colors">
+        <Icon size={18} />
+      </div>
+      <input 
+        type={type} 
+        placeholder={placeholder}
+        value={value}
+        onChange={onChange}
+        className="w-full bg-[#0B1020] border border-white/10 rounded-xl py-4 pl-12 pr-4 text-white placeholder:text-slate-600 focus:outline-none focus:border-[#4FD1FF]/50 focus:ring-1 focus:ring-[#4FD1FF]/50 transition-all shadow-inner"
+      />
     </div>
   );
 
@@ -134,8 +147,8 @@ export default function TalkenApp() {
             </div>
             Talken
           </div>
-          <button onClick={() => setView('app')} className="text-sm font-medium text-slate-300 hover:text-white transition-colors">
-            Login
+          <button onClick={() => setView('login')} className="px-5 py-2 rounded-full border border-white/10 hover:bg-white/5 transition-all text-sm font-medium">
+            Entrar
           </button>
         </nav>
 
@@ -159,10 +172,7 @@ export default function TalkenApp() {
           </p>
 
           <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
-            <button 
-              onClick={() => setView('app')}
-              className="relative group px-8 py-4 rounded-full bg-gradient-to-r from-[#7C6CFF] to-[#4FD1FF] text-white font-bold text-lg shadow-[0_0_20px_-5px_rgba(124,108,255,0.4)] hover:shadow-[0_0_30px_-5px_rgba(124,108,255,0.6)] transition-all hover:scale-[1.02]"
-            >
+            <button onClick={() => setView('login')} className="relative group px-8 py-4 rounded-full bg-gradient-to-r from-[#7C6CFF] to-[#4FD1FF] text-white font-bold text-lg shadow-[0_0_20px_-5px_rgba(124,108,255,0.4)] hover:shadow-[0_0_30px_-5px_rgba(124,108,255,0.6)] transition-all hover:scale-[1.02]">
               Começar Conversa Gratuita
             </button>
             <button className="px-8 py-4 rounded-full border border-white/10 hover:bg-white/5 text-slate-300 hover:text-white transition-all font-medium flex items-center gap-2">
@@ -201,14 +211,86 @@ export default function TalkenApp() {
     );
   }
 
-  // 2. APP VIEW (IMMERSIVE)
+  // --- LOGIN VIEW (NOVA) ---
+  if (view === 'login') {
+    return (
+      <div className="min-h-screen bg-[#0B1020] text-white flex items-center justify-center p-4 relative font-sans">
+        {/* Background Animado */}
+        <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,_var(--tw-gradient-stops))] from-[#0E1629] via-[#0B1020] to-[#0B1020]" />
+        <div className="absolute top-0 left-0 w-full h-full overflow-hidden">
+           <div className="absolute top-[-10%] left-[30%] w-[500px] h-[500px] bg-[#7C6CFF]/10 rounded-full blur-[120px]" />
+        </div>
+
+        {/* Botão Voltar */}
+        <button onClick={() => setView('landing')} className="absolute top-8 left-8 flex items-center gap-2 text-slate-400 hover:text-white transition-colors z-20 text-sm font-medium">
+          <ArrowLeft size={16} /> Voltar
+        </button>
+
+        {/* Card de Login */}
+        <div className="w-full max-w-md bg-[#0E1629]/60 backdrop-blur-2xl border border-white/10 p-8 md:p-10 rounded-3xl shadow-2xl relative z-10 animate-fade-in-up">
+          
+          <div className="text-center mb-10">
+            <div className="w-12 h-12 rounded-xl bg-gradient-to-tr from-[#7C6CFF] to-[#4FD1FF] flex items-center justify-center mx-auto mb-6 shadow-lg">
+              <Zap size={24} className="text-white" fill="currentColor" />
+            </div>
+            <h2 className="text-2xl font-bold mb-2">Bem-vindo de volta</h2>
+            <p className="text-slate-400 text-sm">Acesse seu plano de fluência personalizado.</p>
+          </div>
+
+          <form onSubmit={handleLogin} className="space-y-4">
+            <InputField 
+              icon={Mail} type="email" placeholder="seu@email.com" 
+              value={email} onChange={(e: any) => setEmail(e.target.value)} 
+            />
+            <InputField 
+              icon={Lock} type="password" placeholder="••••••••" 
+              value={password} onChange={(e: any) => setPassword(e.target.value)} 
+            />
+            
+            <div className="flex justify-end">
+              <a href="#" className="text-xs text-[#4FD1FF] hover:text-[#4FD1FF]/80 transition-colors">Esqueceu a senha?</a>
+            </div>
+
+            <button 
+              type="submit" 
+              disabled={isLoadingLogin}
+              className="w-full py-4 rounded-xl bg-gradient-to-r from-[#7C6CFF] to-[#4FD1FF] text-white font-bold text-lg shadow-lg hover:shadow-[#7C6CFF]/25 transition-all hover:scale-[1.01] active:scale-[0.99] disabled:opacity-70 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+            >
+              {isLoadingLogin ? <span className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin"></span> : "Entrar no Talken"}
+            </button>
+          </form>
+
+          <div className="relative my-8">
+            <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-white/10"></div></div>
+            <div className="relative flex justify-center text-xs uppercase"><span className="bg-[#0E1629] px-2 text-slate-500">Ou continue com</span></div>
+          </div>
+
+          <button 
+            type="button"
+            onClick={() => { setIsLoadingLogin(true); setTimeout(() => setView('app'), 1000); }}
+            className="w-full bg-[#0B1020] border border-white/10 text-slate-300 font-medium py-3 rounded-xl hover:bg-white/5 hover:text-white transition-all flex items-center justify-center gap-3"
+          >
+            <svg className="w-5 h-5" viewBox="0 0 24 24"><path fill="currentColor" d="M12.545,10.239v3.821h5.445c-0.712,2.315-2.647,3.972-5.445,3.972c-3.332,0-6.033-2.701-6.033-6.032s2.701-6.032,6.033-6.032c1.498,0,2.866,0.549,3.921,1.453l2.814-2.814C17.503,2.988,15.139,2,12.545,2C7.021,2,2.543,6.477,2.543,12s4.478,10,10.002,10c8.396,0,10.249-7.85,9.426-11.748L12.545,10.239z"/></svg>
+            Google
+          </button>
+
+          <p className="mt-8 text-center text-xs text-slate-500">
+            Ainda não tem conta? <button onClick={() => setView('landing')} className="text-[#4FD1FF] hover:underline">Criar conta grátis</button>
+          </p>
+          
+          <div className="absolute -bottom-16 left-0 right-0 text-center flex items-center justify-center gap-2 text-xs text-slate-600">
+            <ShieldCheck size={12} />
+            <span>Seus dados são criptografados de ponta a ponta.</span>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // --- APP VIEW (IMMERSIVE) ---
   return (
     <div className="h-[100dvh] w-screen bg-[#0B1020] text-white flex flex-col relative overflow-hidden font-sans">
-      
-      {/* Background Sutil */}
       <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,_var(--tw-gradient-stops))] from-[#0E1629] via-[#0B1020] to-[#0B1020]" />
-
-      {/* Header */}
       <div className="relative z-20 px-6 py-4 flex justify-between items-center bg-gradient-to-b from-[#0B1020] to-transparent">
         <button onClick={() => setView('landing')} className="p-2 rounded-full bg-white/5 hover:bg-white/10 text-slate-400 hover:text-white transition-colors">
           <X size={20} />
