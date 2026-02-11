@@ -13,53 +13,70 @@ export async function POST(req: Request) {
     }
 
     // 2. Preparar os dados
-    const { messages } = await req.json();
-    
-    // Pegamos a última mensagem do usuário
-    const userMessage = messages[messages.length - 1].content;
+    const body = await req.json();
+    const { messages } = body;
 
-    console.log("📨 Enviando para Groq:", userMessage);
+    // Validate messages
+    if (!messages || !Array.isArray(messages) || messages.length === 0) {
+      console.error("❌ Mensagens inválidas:", messages);
+      return new Response(JSON.stringify({ error: "Mensagens inválidas" }), { status: 400 });
+    }
+
+    // Filtra e valida mensagens
+    const validMessages = messages.filter((m: any) => m && m.role && m.content).map((m: any) => ({
+      role: String(m.role).trim(),
+      content: String(m.content).trim()
+    }));
+
+    if (validMessages.length === 0) {
+      console.error("❌ Nenhuma mensagem válida:", messages);
+      return new Response(JSON.stringify({ error: "Nenhuma mensagem válida" }), { status: 400 });
+    }
+
+    console.log("📨 Mensagens validadas:", validMessages.length);
 
     // 3. Chamada Direta (Fetch) - Sem SDKs para quebrar
+    const requestBody = {
+      model: "llama3-8b-8192",
+      messages: [
+        {
+          role: "system",
+          content: `You are Talken, a friendly English tutor. Keep answers short (max 2 sentences). Correct grammar in bold (e.g., **went**). Always end with a question.`
+        },
+        ...validMessages
+      ],
+      stream: true,
+      max_tokens: 250,
+      temperature: 0.7
+    };
+
+    console.log("📤 Enviando para Groq:", JSON.stringify(requestBody));
+
     const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${apiKey}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({
-        model: "llama3-8b-8192", // Modelo rápido
-        messages: [
-          {
-            role: "system",
-            content: `You are Talken, a friendly English tutor. 
-                      Keep answers short (max 2 sentences). 
-                      Correct grammar in bold (e.g., **went**). 
-                      Always end with a question.`
-          },
-          ...messages.map((m: any) => ({
-            role: m.role,
-            content: m.content
-          }))
-        ],
-        stream: true, // Importante para o efeito de digitação
-      }),
+      body: JSON.stringify(requestBody),
     });
 
     if (!response.ok) {
       const errorText = await response.text();
-      console.error("🔥 Erro da Groq:", errorText);
-      return new Response(errorText, { status: response.status });
+      console.error("🔥 Erro da Groq (Status:", response.status + "):", errorText);
+      return new Response(
+        JSON.stringify({ error: `Groq API Error: ${errorText}` }),
+        { status: response.status, headers: { 'Content-Type': 'application/json' } }
+      );
     }
 
     // 4. Repassar o fluxo de dados (Stream) direto para o Frontend
-    // O Vercel AI SDK no frontend sabe ler esse stream nativo da OpenAI/Groq
     return new Response(response.body, {
       headers: { 'Content-Type': 'text/event-stream' }
     });
 
   } catch (error: any) {
     console.error("💀 Erro Fatal:", error);
-    return new Response(JSON.stringify({ error: error.message }), { status: 500 });
+    return new Response(JSON.stringify({ error: error.message }), { status: 500, headers: { 'Content-Type': 'application/json' } });
   }
 }
