@@ -1,64 +1,54 @@
-import { streamText, generateText } from 'ai';
 import { createOpenAI } from '@ai-sdk/openai';
+import { streamText } from 'ai';
 
-// Configuração da Groq (Compatível com OpenAI)
+// Configuração da Groq
 const groq = createOpenAI({
   baseURL: 'https://api.groq.com/openai/v1',
   apiKey: process.env.GROQ_API_KEY,
 });
 
-// Edge Runtime para velocidade máxima
-export const runtime = 'edge';
+// IMPORTANTE: Removemos o 'runtime = edge' para evitar conflitos no Netlify Free
+// export const runtime = 'edge'; 
 
 export async function POST(req: Request) {
   try {
-    // Validação de segurança simples
+    // 1. Log para debug no painel do Netlify
+    console.log("🚀 Recebendo requisição...");
+
+    // 2. Verificação de Segurança
     if (!process.env.GROQ_API_KEY) {
-      return new Response("Erro: Chave GROQ_API_KEY não encontrada.", { status: 500 });
+      console.error("❌ Chave GROQ_API_KEY não encontrada");
+      throw new Error("Chave de API não configurada no servidor (Netlify Env Var).");
     }
 
     const { messages } = await req.json();
 
-    // O Prompt do Professor
+    // 3. Prompt do Sistema
     const systemPrompt = `
-      You are Talken AI, an energetic American English Tutor.
-      Role: Help the user practice speaking. 
+      You are Talken AI, a friendly American English Tutor.
+      Your goal: Keep the user talking.
       Rules:
-      1. Concise responses (max 2 sentences).
-      2. Correct grammar mistakes using Markdown bolding (e.g., "**I went**").
-      3. Always end with a simple question to keep the conversation flowing.
+      1. Responses must be short (max 2 sentences).
+      2. If the user makes a grammar mistake, correct it in bold (e.g., "**I went**").
+      3. Always end with a question.
     `;
 
-    // Usar fetch direto à API Groq (compatível com OpenAI)
-    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${process.env.GROQ_API_KEY}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: 'llama-3.1-8b-instant',
-        messages: [
-          { role: 'system', content: systemPrompt },
-          ...messages,
-        ],
-        stream: true,
-        temperature: 0.7,
-        max_tokens: 150,
-      }),
+    // 4. Chamada para a Groq (Modelo Llama 3 8B - Super Rápido)
+    const result = await streamText({
+      model: groq('llama3-8b-8192'), // Modelo mais estável da Groq
+      system: systemPrompt,
+      messages,
     });
 
-    // Passar o stream diretamente
-    return new Response(response.body, {
-      headers: {
-        'Content-Type': 'text/event-stream',
-        'Cache-Control': 'no-cache',
-        'Connection': 'keep-alive',
-      },
-    });
+    return result.toDataStreamResponse();
 
   } catch (error: any) {
-    console.error("🔥 ERRO NA API:", error);
-    return new Response(`Erro no servidor: ${error.message}`, { status: 500 });
+    console.error("🔥 ERRO FATAL NA API:", error);
+    
+    // Retorna o erro exato para o frontend mostrar
+    return new Response(JSON.stringify({ error: error.message }), { 
+      status: 500,
+      headers: { 'Content-Type': 'application/json' }
+    });
   }
 }
