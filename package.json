@@ -9,11 +9,9 @@
     "lint": "next lint"
   },
   "dependencies": {
-    "@ai-sdk/google": "0.0.18",
-    "@ai-sdk/openai": "^3.0.27",
     "@supabase/ssr": "^0.1.0",
     "@supabase/supabase-js": "^2.0.0",
-    "ai": "3.1.14",
+    "ai": "^3.1.14",
     "autoprefixer": "10.4.17",
     "clsx": "^1.2.1",
     "lucide-react": "^0.275.0",
