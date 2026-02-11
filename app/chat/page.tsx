@@ -1,8 +1,8 @@
 "use client"
 import React from 'react'
 import { useChat } from 'ai/react'
-import Message from '../../components/Message'
-import ChatInput from '../../components/ChatInput'
+import Message from '../../components/Message.tsx'
+import ChatInput from '../../components/ChatInput.tsx'
 
 export default function ChatPage() {
   const { messages, input, handleInputChange, handleSubmit } = useChat({

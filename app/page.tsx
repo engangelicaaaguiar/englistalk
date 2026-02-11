@@ -2,343 +2,284 @@
 
 import { useChat } from 'ai/react';
 import { useEffect, useState, useRef } from 'react';
-import { Mic, MicOff, Volume2, ArrowRight, Lock, User, Sparkles, CheckCircle2, Activity, X } from 'lucide-react';
-
-// --- COMPONENTES VISUAIS (UI KIT) ---
-
-// Botão com brilho
-const ShinyButton = ({ children, onClick, className = "" }: any) => (
-  <button 
-    onClick={onClick}
-    className={`relative group px-8 py-3 rounded-full bg-gradient-to-r from-indigo-500 to-purple-600 text-white font-semibold shadow-lg hover:shadow-indigo-500/30 transition-all transform hover:scale-105 ${className}`}
-  >
-    <div className="absolute inset-0 rounded-full bg-white opacity-0 group-hover:opacity-20 transition-opacity"></div>
-    <span className="relative flex items-center gap-2">{children}</span>
-  </button>
-);
-
-// Card de Vidro (Glassmorphism)
-const GlassCard = ({ children, className = "" }: any) => (
-  <div className={`backdrop-blur-xl bg-white/5 border border-white/10 shadow-2xl rounded-3xl ${className}`}>
-    {children}
-  </div>
-);
-
-// --- APP PRINCIPAL ---
+import { Mic, MicOff, Wifi, WifiOff, X, Sparkles, Monitor, Smartphone, ChevronRight } from 'lucide-react';
 
 export default function App() {
-  // Estados da Jornada do Usuário
-  const [view, setView] = useState<'landing' | 'login' | 'app'>('landing');
-  const [email, setEmail] = useState('');
-  
-  // Estados do Chat/Voz
-  const { messages, input, setInput, handleSubmit, isLoading } = useChat({
-    onError: (err) => setStatus(`Erro na IA: ${err.message}`)
-  });
-  
+  // --- ESTADOS ---
+  const [view, setView] = useState<'landing' | 'app'>('landing');
   const [isListening, setIsListening] = useState(false);
-  const [status, setStatus] = useState("Pronto"); // Debug visual para você
-  const [volume, setVolume] = useState(0); // Para animar o orbe
+  const [status, setStatus] = useState("Pronto");
+  const [debugLog, setDebugLog] = useState("");
 
-  // Refs
+  // --- HOOK DA IA ---
+  const { messages, append, isLoading } = useChat({
+    api: '/api/chat',
+    onError: (err) => {
+      setStatus("Erro API");
+      setDebugLog(`API Error: ${err.message}. Verifique a chave no .env.local`);
+    },
+    onFinish: () => {
+      setStatus("Sua vez");
+      restartListening();
+    }
+  });
+
   const recognitionRef = useRef<any>(null);
   const silenceTimerRef = useRef<any>(null);
   const synthRef = useRef<SpeechSynthesis | null>(null);
 
-  // --- LÓGICA DE VOZ (Refatorada e Robusta) ---
+  // --- LÓGICA DE VOZ (Universal) ---
   useEffect(() => {
-    if (typeof window !== 'undefined') {
+    if (typeof window !== 'undefined' && view === 'app') {
       synthRef.current = window.speechSynthesis;
       // @ts-ignore
       const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
 
-      if (SpeechRecognition) {
-        const recognition = new SpeechRecognition();
-        recognition.continuous = true; 
-        recognition.interimResults = true;
-        recognition.lang = 'en-US';
-
-        recognition.onstart = () => {
-          setIsListening(true);
-          setStatus("Ouvindo... (Fale agora)");
-        };
-        
-        recognition.onend = () => {
-          // Se parar sozinho mas a gente queria continuar ouvindo, reinicia
-          if (view === 'app' && !isLoading && !synthRef.current?.speaking) {
-            // Pequeno delay para não travar o browser
-            setTimeout(() => {
-               if(!isListening) recognition.start();
-            }, 1000);
-          }
-        };
-
-        recognition.onerror = (event: any) => {
-          console.error("Erro no microfone:", event.error);
-          setStatus(`Erro Mic: ${event.error}`);
-          setIsListening(false);
-        };
-
-        recognition.onresult = (event: any) => {
-          const transcript = Array.from(event.results)
-            .map((result: any) => result[0])
-            .map((result: any) => result.transcript)
-            .join('');
-
-          if (event.results[0].isFinal) {
-             setInput(transcript);
-             setStatus("Processando silêncio...");
-             
-             // Lógica de Silêncio: Espera 1.2s após a frase final para enviar
-             clearTimeout(silenceTimerRef.current);
-             silenceTimerRef.current = setTimeout(() => {
-               recognition.stop();
-               setStatus("Enviando para IA...");
-               // Hack para submeter o formulário programaticamente
-               const form = document.getElementById('voice-form') as HTMLFormElement;
-               if (form) {
-                 form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
-               }
-             }, 1200);
-          }
-        };
-        recognitionRef.current = recognition;
+      if (!SpeechRecognition) {
+        setDebugLog("Navegador incompatível (Use Chrome/Edge).");
+        return;
       }
-    }
-  }, [view]);
 
-  // Efeito de Volume Simulado (Para animar o orbe quando ouve)
-  useEffect(() => {
+      const recognition = new SpeechRecognition();
+      recognition.continuous = true; 
+      recognition.interimResults = true;
+      recognition.lang = 'en-US';
+
+      recognition.onstart = () => {
+        setIsListening(true);
+        setStatus("Ouvindo...");
+      };
+      
+      recognition.onend = () => {
+        setIsListening(false);
+      };
+
+      recognition.onerror = (event: any) => {
+        // Ignora erros comuns de 'no-speech' para não poluir a tela
+        if (event.error !== 'no-speech') {
+             setDebugLog(`Mic: ${event.error}`);
+        }
+        setIsListening(false);
+      };
+
+      recognition.onresult = (event: any) => {
+        const transcript = Array.from(event.results)
+          .map((result: any) => result[0])
+          .map((result: any) => result.transcript)
+          .join('');
+
+        // Se for Desktop, mostra o texto enquanto fala. Se for mobile, simplifica.
+        setStatus(window.innerWidth > 768 ? `Ouvindo: ${transcript}` : "Ouvindo...");
+
+        if (event.results[0].isFinal) {
+           clearTimeout(silenceTimerRef.current);
+           setStatus("Analisando...");
+           
+           silenceTimerRef.current = setTimeout(() => {
+             recognition.stop();
+             setStatus("Enviando...");
+             append({ role: 'user', content: transcript });
+           }, 1200);
+        }
+      };
+      recognitionRef.current = recognition;
+    }
+  }, [view, append]);
+
+  const restartListening = () => {
+    try { recognitionRef.current?.start(); } catch(e) {}
+  };
+
+  const toggleListening = () => {
     if (isListening) {
-      const interval = setInterval(() => setVolume(Math.random() * 100), 100);
-      return () => clearInterval(interval);
+      recognitionRef.current?.stop();
     } else {
-      setVolume(0);
+      restartListening();
     }
-  }, [isListening]);
+  }
 
-  // IA Fala -> Usuário Ouve
+  // --- TTS (Fala) ---
   useEffect(() => {
     const lastMessage = messages[messages.length - 1];
     if (lastMessage?.role === 'assistant' && !isLoading) {
-      setStatus("IA Falando...");
       speak(lastMessage.content);
     }
   }, [messages, isLoading]);
 
   const speak = (text: string) => {
     if (!synthRef.current) return;
-    synthRef.current.cancel(); // Para fala anterior
+    synthRef.current.cancel();
 
-    const cleanText = text.replace(/\*\*/g, '').replace(/[\#\*]/g, '');
+    const cleanText = text.replace(/[*#]/g, '');
     const utterance = new SpeechSynthesisUtterance(cleanText);
     utterance.lang = 'en-US';
-    utterance.rate = 1.0;
     
-    // Tenta pegar voz melhor
     const voices = synthRef.current.getVoices();
-    const bestVoice = voices.find(v => v.name.includes('Google US English')) || voices.find(v => v.name.includes('Samantha')) || voices[0];
+    const bestVoice = voices.find(v => v.name.includes('Google US English')) || voices[0];
     if (bestVoice) utterance.voice = bestVoice;
 
+    utterance.onstart = () => setStatus("IA Falando...");
     utterance.onend = () => {
-       setStatus("Sua vez...");
-       try { recognitionRef.current?.start(); } catch(e) {}
+      setStatus("Sua vez");
+      restartListening();
     };
 
     synthRef.current.speak(utterance);
   };
 
-  const startSession = () => {
-    try {
-      recognitionRef.current?.start();
-      setStatus("Sessão Iniciada");
-    } catch (e) {
-      setStatus("Clique no Orbe para ativar");
-    }
-  };
+  // --- UI RENDER ---
 
-  // --- RENDERIZAÇÃO DAS TELAS ---
-
-  // 1. LANDING PAGE
+  // 1. LANDING PAGE (Desktop & Mobile Otimizada)
   if (view === 'landing') {
     return (
-      <div className="min-h-screen bg-slate-950 text-white selection:bg-indigo-500 selection:text-white overflow-hidden font-sans">
-        {/* Background Gradients */}
-        <div className="fixed top-0 left-0 w-full h-full overflow-hidden -z-10">
-          <div className="absolute top-[-10%] left-[-10%] w-[50%] h-[50%] bg-indigo-600/20 rounded-full blur-[120px]" />
-          <div className="absolute bottom-[-10%] right-[-10%] w-[50%] h-[50%] bg-purple-600/20 rounded-full blur-[120px]" />
-        </div>
-
-        <nav className="p-6 flex justify-between items-center max-w-7xl mx-auto">
+      <div className="min-h-screen bg-slate-950 text-white font-sans selection:bg-indigo-500 overflow-x-hidden">
+        {/* Navbar */}
+        <nav className="max-w-7xl mx-auto p-6 flex justify-between items-center">
           <div className="flex items-center gap-2 font-bold text-xl tracking-tight">
-            <Sparkles className="text-indigo-400" /> NativeTalk AI
+            <Sparkles className="text-indigo-500" /> TalkNative
           </div>
-          <button onClick={() => setView('login')} className="text-sm font-medium hover:text-indigo-400 transition-colors">Login</button>
+          <button onClick={() => setView('app')} className="hidden md:block px-6 py-2 rounded-full border border-white/20 hover:bg-white/10 transition-all text-sm font-medium">
+            Entrar
+          </button>
         </nav>
 
-        <main className="flex flex-col items-center justify-center min-h-[80vh] text-center px-4">
-          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-white/5 border border-white/10 text-xs font-medium text-indigo-300 mb-8 backdrop-blur-md">
-            <span className="relative flex h-2 w-2">
-              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-indigo-400 opacity-75"></span>
-              <span className="relative inline-flex rounded-full h-2 w-2 bg-indigo-500"></span>
-            </span>
-            Nova Engine Gemini 2.5 Ativada
+        {/* Hero Section */}
+        <main className="max-w-7xl mx-auto px-6 pt-10 md:pt-20 flex flex-col md:flex-row items-center gap-12">
+          
+          {/* Texto (Esquerda) */}
+          <div className="flex-1 text-center md:text-left z-10">
+            <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-indigo-900/30 border border-indigo-500/30 text-indigo-300 text-xs font-bold uppercase tracking-widest mb-8">
+              <span className="w-2 h-2 rounded-full bg-indigo-500 animate-pulse"></span>
+              Voice Engine 2.0 Live
+            </div>
+            
+            <h1 className="text-5xl md:text-7xl lg:text-8xl font-extrabold tracking-tighter mb-6 leading-[1.1]">
+              Fluência <br/>
+              <span className="text-transparent bg-clip-text bg-gradient-to-r from-indigo-400 to-purple-400">Instantânea.</span>
+            </h1>
+            
+            <p className="text-lg md:text-2xl text-slate-400 mb-10 max-w-xl mx-auto md:mx-0 leading-relaxed">
+              Pratique inglês conversando com uma IA nativa. Sem digitar, sem agendar. Apenas fale.
+            </p>
+
+            <button 
+              onClick={() => setView('app')}
+              className="group relative inline-flex items-center gap-3 px-8 py-4 bg-white text-slate-950 rounded-full font-bold text-lg hover:bg-indigo-50 transition-all shadow-[0_0_40px_-10px_rgba(255,255,255,0.3)] hover:shadow-[0_0_60px_-10px_rgba(255,255,255,0.5)]"
+            >
+              Iniciar Sessão Agora
+              <ChevronRight className="group-hover:translate-x-1 transition-transform" />
+            </button>
           </div>
 
-          <h1 className="text-5xl md:text-7xl font-extrabold tracking-tight mb-6 bg-clip-text text-transparent bg-gradient-to-b from-white to-white/60">
-            Fluência em Inglês <br /> sem Julgamentos.
-          </h1>
-          
-          <p className="text-lg md:text-xl text-slate-400 max-w-2xl mb-10 leading-relaxed">
-            Pratique conversação com uma IA que te ouve, entende e corrige sutilmente. 
-            Como um professor nativo, disponível 24h.
-          </p>
-
-          <ShinyButton onClick={() => setView('login')}>
-            Começar Agora Grátis <ArrowRight size={18} />
-          </ShinyButton>
-
-          <div className="mt-20 flex gap-8 opacity-50 grayscale hover:grayscale-0 transition-all duration-500">
-            {/* Fake logos for social proof */}
-            <span className="text-xl font-bold font-serif">Wired</span>
-            <span className="text-xl font-bold font-mono">TechCrunch</span>
-            <span className="text-xl font-bold italic">Forbes</span>
+          {/* Visual (Direita - Desktop Only) */}
+          <div className="flex-1 relative hidden md:flex justify-center">
+            <div className="relative w-96 h-96 bg-gradient-to-tr from-indigo-600 to-purple-600 rounded-full blur-[100px] opacity-50 animate-pulse"></div>
+            <div className="absolute inset-0 flex items-center justify-center">
+               <div className="w-80 h-80 rounded-[3rem] bg-slate-900/50 backdrop-blur-xl border border-white/10 shadow-2xl flex items-center justify-center transform rotate-6 hover:rotate-0 transition-all duration-700">
+                  <div className="text-center">
+                    <div className="w-20 h-20 bg-indigo-500 rounded-full mx-auto mb-6 flex items-center justify-center shadow-lg">
+                      <Mic className="text-white w-10 h-10" />
+                    </div>
+                    <p className="text-2xl font-bold">"Hello!"</p>
+                    <p className="text-slate-400 mt-2">Listening...</p>
+                  </div>
+               </div>
+            </div>
           </div>
         </main>
       </div>
     );
   }
 
-  // 2. LOGIN SCREEN
-  if (view === 'login') {
-    return (
-      <div className="min-h-screen bg-slate-950 flex items-center justify-center p-4 relative">
-        {/* Background Decorative */}
-        <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_center,_var(--tw-gradient-stops))] from-indigo-900/20 via-slate-950 to-slate-950" />
-        
-        <GlassCard className="w-full max-w-md p-8 relative z-10">
-          <div className="text-center mb-8">
-            <h2 className="text-2xl font-bold text-white mb-2">Bem-vindo de volta</h2>
-            <p className="text-slate-400 text-sm">Entre para continuar sua jornada de fluência.</p>
-          </div>
-
-          <div className="space-y-4">
-            <div>
-              <label className="block text-xs font-medium text-slate-300 mb-1 ml-1">Email</label>
-              <div className="relative">
-                <User className="absolute left-3 top-3 text-slate-500" size={18} />
-                <input 
-                  type="email" 
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  className="w-full bg-slate-900/50 border border-slate-700 rounded-xl py-3 pl-10 pr-4 text-white focus:outline-none focus:ring-2 focus:ring-indigo-500 transition-all placeholder:text-slate-600"
-                  placeholder="seu@email.com"
-                />
-              </div>
-            </div>
-            
-            <button 
-              onClick={() => setView('app')} // Fake login for demo
-              className="w-full bg-white text-slate-900 font-bold py-3 rounded-xl hover:bg-indigo-50 transition-colors flex items-center justify-center gap-2"
-            >
-              Entrar <ArrowRight size={18} />
-            </button>
-            
-            <div className="relative my-6">
-              <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-slate-700"></div></div>
-              <div className="relative flex justify-center text-xs uppercase"><span className="bg-slate-900 px-2 text-slate-500">Ou continue com</span></div>
-            </div>
-
-            <button className="w-full bg-slate-800 border border-slate-700 text-white font-medium py-3 rounded-xl hover:bg-slate-700 transition-colors flex items-center justify-center gap-2">
-              <svg className="w-5 h-5" viewBox="0 0 24 24"><path fill="currentColor" d="M12.545,10.239v3.821h5.445c-0.712,2.315-2.647,3.972-5.445,3.972c-3.332,0-6.033-2.701-6.033-6.032s2.701-6.032,6.033-6.032c1.498,0,2.866,0.549,3.921,1.453l2.814-2.814C17.503,2.988,15.139,2,12.545,2C7.021,2,2.543,6.477,2.543,12s4.478,10,10.002,10c8.396,0,10.249-7.85,9.426-11.748L12.545,10.239z"/></svg>
-              Google
-            </button>
-          </div>
-        </GlassCard>
-      </div>
-    );
-  }
-
-  // 3. APP INTERFACE (VOICE MODE)
+  // 2. APP INTERFACE (HÍBRIDA: Desktop + Mobile)
   return (
-    <div className="min-h-screen bg-black text-white flex flex-col items-center justify-center relative overflow-hidden font-sans">
-      {/* Formulário Invisível para o AI SDK */}
-      <form id="voice-form" onSubmit={handleSubmit} className="hidden">
-        <input value={input} onChange={(e) => setInput(e.target.value)} />
-      </form>
+    <div className="h-screen w-screen bg-black text-white flex flex-col relative overflow-hidden font-sans">
+      
+      {/* Background Dinâmico */}
+      <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,_var(--tw-gradient-stops))] from-indigo-900/10 via-black to-black -z-10" />
 
-      {/* Header App */}
-      <div className="absolute top-0 w-full p-6 flex justify-between items-center z-20">
-        <div className="flex items-center gap-2 text-slate-400">
-          <Activity size={16} className={isListening ? "text-green-500" : "text-slate-600"} />
-          <span className="text-xs font-mono uppercase tracking-widest">{status}</span>
-        </div>
-        <button onClick={() => setView('landing')} className="p-2 rounded-full bg-white/5 hover:bg-white/10 transition-colors">
-          <X size={20} className="text-slate-400" />
+      {/* HEADER */}
+      <div className="w-full p-6 flex justify-between items-center z-20">
+        <button onClick={() => setView('landing')} className="p-3 rounded-full bg-white/5 hover:bg-white/10 transition-colors">
+          <X size={24} className="text-slate-400" />
         </button>
-      </div>
 
-      {/* O CÉREBRO VISUAL (ORBE) */}
-      <div className="relative z-10 cursor-pointer group" onClick={startSession}>
-        {/* Glow Effects */}
-        <div className={`absolute inset-0 rounded-full blur-[80px] transition-all duration-700 
-          ${isLoading ? 'bg-purple-600/40 scale-150' : 
-            isListening ? 'bg-indigo-500/30 scale-125' : 
-            'bg-slate-800/20 scale-100'}`} 
-        />
-        
-        {/* Main Orb Container */}
-        <div className={`relative w-64 h-64 rounded-full backdrop-blur-md border border-white/10 shadow-2xl flex items-center justify-center transition-all duration-500
-           ${isListening ? 'scale-105 border-indigo-500/50' : 'scale-100 border-white/10'}
-        `}>
-          {/* Inner Core Animation */}
-          <div className={`w-48 h-48 rounded-full bg-gradient-to-tr from-slate-900 to-slate-800 flex items-center justify-center overflow-hidden relative shadow-inner`}>
-             {/* Waveform Visualization (Fake mas bonito) */}
-             <div className="flex items-center gap-1 h-20">
-                {[...Array(5)].map((_, i) => (
-                  <div key={i} 
-                    className={`w-3 rounded-full bg-indigo-400 transition-all duration-100`}
-                    style={{ 
-                      height: isListening ? `${20 + (Math.random() * volume)}%` : '10%',
-                      opacity: isListening ? 1 : 0.3
-                    }}
-                  />
-                ))}
-             </div>
-          </div>
+        {/* Status Bar Centralizada no Desktop */}
+        <div className="hidden md:flex items-center gap-4 bg-white/5 px-6 py-2 rounded-full border border-white/5 backdrop-blur-md">
+           <div className={`w-2 h-2 rounded-full ${status.includes('Erro') ? 'bg-red-500' : 'bg-green-500 animate-pulse'}`}></div>
+           <span className="text-sm font-medium text-slate-300 uppercase tracking-widest">{status}</span>
+        </div>
 
-          {/* Status Icon Overlay */}
-          <div className="absolute bottom-4 right-4 bg-slate-900 rounded-full p-3 border border-slate-700 shadow-lg">
-             {isLoading ? <Sparkles className="animate-spin text-purple-400" size={20} /> : 
-              isListening ? <Mic className="text-indigo-400" size={20} /> : 
-              <MicOff className="text-slate-600" size={20} />}
-          </div>
+        {/* Ícone de Dispositivo (Debug Visual) */}
+        <div className="text-slate-600 hidden md:block">
+           <Monitor size={20} />
         </div>
       </div>
 
-      {/* Legendas e Feedback */}
-      <div className="mt-12 h-32 px-6 max-w-2xl w-full text-center flex flex-col items-center justify-start z-20">
-        <p className={`text-2xl md:text-3xl font-light leading-snug transition-all duration-500 
-          ${isLoading ? 'opacity-50 blur-sm' : 'opacity-100'}`}>
-          {messages.length > 0 && messages[messages.length - 1].role === 'assistant' 
-            ? <span dangerouslySetInnerHTML={{ __html: messages[messages.length - 1].content.replace(/\*\*(.*?)\*\*/g, '<span class="text-indigo-400 font-semibold">$1</span>') }} />
-            : input || "Toque no orbe e diga Hello!"}
-        </p>
+      {/* ÁREA CENTRAL - O ORBE RESPONSIVO */}
+      <div className="flex-1 flex flex-col items-center justify-center relative w-full">
         
-        {/* Dica de Gramática (Só aparece se a IA detectar erro no texto anterior) */}
-        {messages.length > 0 && messages[messages.length - 1].content.includes('**') && (
-           <div className="mt-4 flex items-center gap-2 bg-indigo-900/30 border border-indigo-500/30 px-4 py-2 rounded-full text-xs text-indigo-300 animate-fade-in-up">
-              <CheckCircle2 size={12} /> Correção Disponível
+        <div 
+          onClick={toggleListening}
+          className="relative cursor-pointer group"
+        >
+          {/* Glow Gigante no Desktop, Menor no Mobile */}
+          <div className={`absolute inset-0 rounded-full transition-all duration-700 
+            ${isLoading ? 'bg-purple-600/30 blur-[60px] md:blur-[120px] scale-150' : 
+              isListening ? 'bg-indigo-500/30 blur-[60px] md:blur-[120px] scale-125' : 
+              'bg-slate-800/10 blur-[40px] scale-100'}`} 
+          />
+          
+          {/* O Orbe Físico - Responsivo via Tailwind (w-48 mobile vs w-96 desktop) */}
+          <div className={`relative w-48 h-48 md:w-80 md:h-80 rounded-full backdrop-blur-2xl border flex items-center justify-center transition-all duration-500 shadow-2xl
+             ${isListening 
+               ? 'border-indigo-500/50 bg-indigo-900/10 scale-110 md:scale-105' 
+               : 'border-white/10 bg-black/40 hover:border-white/30 hover:bg-white/5'}
+          `}>
+            {isLoading ? (
+              <Sparkles className="animate-spin text-purple-400 w-12 h-12 md:w-20 md:h-20" />
+            ) : isListening ? (
+              // Ondas de Som Animadas
+              <div className="flex gap-1.5 md:gap-3 items-center h-12 md:h-24">
+                 {[...Array(5)].map((_, i) => (
+                   <div key={i} className="w-1.5 md:w-3 bg-indigo-400 rounded-full animate-bounce" 
+                        style={{ animationDuration: `${0.4 + (i * 0.1)}s`, height: '100%' }}></div>
+                 ))}
+              </div>
+            ) : (
+              <MicOff className="text-slate-600 w-10 h-10 md:w-16 md:h-16 group-hover:text-white transition-colors" />
+            )}
+          </div>
+
+          {/* Dica de Hover (Só aparece no Desktop) */}
+          <p className="hidden md:block absolute -bottom-12 left-0 right-0 text-center text-sm text-slate-500 uppercase tracking-[0.2em] opacity-0 group-hover:opacity-100 transition-opacity">
+            {isListening ? "Clique para Pausar" : "Clique para Falar"}
+          </p>
+        </div>
+      </div>
+
+      {/* ÁREA DE LEGENDAS (Responsiva) */}
+      <div className="w-full min-h-[20vh] md:min-h-[25vh] bg-gradient-to-t from-black via-black/80 to-transparent p-6 md:p-12 flex flex-col justify-end items-center text-center z-20">
+        
+        {/* Debug Log (Erro apenas) */}
+        {debugLog && (
+           <div className="mb-4 text-xs text-red-400 bg-red-900/20 px-3 py-1 rounded border border-red-500/20">
+             {debugLog}
            </div>
         )}
-      </div>
 
-      {/* Footer / Controls */}
-      <div className="absolute bottom-10 flex gap-4 opacity-50 hover:opacity-100 transition-opacity">
-        <button className="text-xs text-slate-500 uppercase hover:text-white transition-colors">Settings</button>
-        <button className="text-xs text-slate-500 uppercase hover:text-white transition-colors">History</button>
+        <div className="max-w-4xl">
+          <p className={`text-2xl md:text-4xl lg:text-5xl font-light leading-tight transition-all duration-500
+            ${isLoading ? 'opacity-50 blur-sm' : 'opacity-100'}`}>
+            {messages.length > 0 
+              ? messages[messages.length - 1].role === 'assistant' 
+                 ? <span dangerouslySetInnerHTML={{ __html: messages[messages.length - 1].content.replace(/\*\*(.*?)\*\*/g, '<span class="text-indigo-400 font-normal">$1</span>') }} />
+                 : <span className="text-slate-500 italic">"{messages[messages.length - 1].content}"</span>
+              : <span className="text-slate-600">Diga "Hello" para começar.</span>
+            }
+          </p>
+        </div>
       </div>
     </div>
   );
 }
-
