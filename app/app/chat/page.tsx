@@ -35,6 +35,8 @@ type ProfilePayload = {
   ttsSpeed: number;
 };
 
+const SILENCE_GRACE_MS = 2000;
+
 const EMPTY_METRICS: ConfidenceMetrics = {
   totalWords: 0,
   masteredWords: 0,
@@ -89,6 +91,7 @@ export default function AppChatPage() {
   const progressRef = useRef<UserProgressRow | null>(null);
   const fullNameRef = useRef('');
   const userIdRef = useRef('');
+  const silenceDecisionTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     messagesRef.current = messages;
@@ -429,7 +432,8 @@ export default function AppChatPage() {
     const recognition = new SpeechRecognition();
     recognition.lang = progress?.settings.voice || 'en-US';
     recognition.interimResults = true;
-    recognition.continuous = false;
+    recognition.continuous = true;
+    recognition.maxAlternatives = 3;
 
     recognition.onstart = () => {
       setIsListening(true);
@@ -437,6 +441,11 @@ export default function AppChatPage() {
     };
 
     recognition.onresult = (event: any) => {
+      if (silenceDecisionTimeoutRef.current) {
+        clearTimeout(silenceDecisionTimeoutRef.current);
+        silenceDecisionTimeoutRef.current = null;
+      }
+
       let finalText = '';
       let interimText = '';
 
@@ -458,25 +467,34 @@ export default function AppChatPage() {
     recognition.onend = () => {
       setIsListening(false);
 
-      const transcript = (finalTranscriptRef.current || interimTranscriptRef.current).trim();
-      if (transcript && !pendingSendRef.current) {
-        finalTranscriptRef.current = '';
-        interimTranscriptRef.current = '';
-        void sendTranscript(transcript);
-        return;
+      if (silenceDecisionTimeoutRef.current) {
+        clearTimeout(silenceDecisionTimeoutRef.current);
       }
 
-      if (
-        shouldAutoListenRef.current &&
-        !pendingSendRef.current &&
-        !isSpeakingRef.current &&
-        !ttsPendingRef.current
-      ) {
-        startListening();
-        return;
-      }
+      setStatus('Aguardando fim da pausa...');
+      silenceDecisionTimeoutRef.current = setTimeout(() => {
+        silenceDecisionTimeoutRef.current = null;
 
-      setStatus('Toque no balao e fale em ingles');
+        const transcript = (finalTranscriptRef.current || interimTranscriptRef.current).trim();
+        if (transcript && !pendingSendRef.current) {
+          finalTranscriptRef.current = '';
+          interimTranscriptRef.current = '';
+          void sendTranscript(transcript);
+          return;
+        }
+
+        if (
+          shouldAutoListenRef.current &&
+          !pendingSendRef.current &&
+          !isSpeakingRef.current &&
+          !ttsPendingRef.current
+        ) {
+          startListening();
+          return;
+        }
+
+        setStatus('Toque no balao e fale em ingles');
+      }, SILENCE_GRACE_MS);
     };
 
     recognition.onerror = (event: any) => {
@@ -493,8 +511,17 @@ export default function AppChatPage() {
 
       if (code === 'no-speech') {
         if (shouldAutoListenRef.current) {
-          setStatus('Nao ouvi sua fala. Tente novamente.');
-          startListening();
+          setStatus('Nao ouvi sua fala. Mantendo microfone aberto...');
+          setTimeout(() => {
+            if (
+              shouldAutoListenRef.current &&
+              !pendingSendRef.current &&
+              !isSpeakingRef.current &&
+              !ttsPendingRef.current
+            ) {
+              startListening();
+            }
+          }, SILENCE_GRACE_MS);
         }
         return;
       }
@@ -515,6 +542,10 @@ export default function AppChatPage() {
     recognitionRef.current = recognition;
 
     return () => {
+      if (silenceDecisionTimeoutRef.current) {
+        clearTimeout(silenceDecisionTimeoutRef.current);
+        silenceDecisionTimeoutRef.current = null;
+      }
       recognition.stop();
       synthRef.current?.cancel();
     };
