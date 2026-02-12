@@ -22,7 +22,7 @@ export async function POST(req: Request) {
     // ✅ SEM STREAMING - teste simples
     console.log("🧪 Chamando generateText (sem stream)...");
     const result = await generateText({
-      model: groq('llama3-8b-8192') as any,
+      model: groq('llama-3.1-8b-instant') as any,
       system: 'Você é um tutor de inglês. Respostas curtas.',
       messages,
       maxTokens: 50,

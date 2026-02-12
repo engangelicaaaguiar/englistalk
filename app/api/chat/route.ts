@@ -66,9 +66,9 @@ export async function POST(req: Request) {
     console.log("✅ Groq criado");
 
     // 4. Chamar generateText (SEM STREAMING - TESTE)
-    console.log("📡 Chamando generateText (SEM streaming)...");
+    console.log("📡 Chamando generateText com modelo llama-3.1-8b-instant (NOVO)...");
     const result = await generateText({
-      model: groq('llama3-8b-8192') as any,
+      model: groq('llama-3.1-8b-instant') as any,
       system: `You are "Talken", a friendly English tutor.
 1. Keep responses short (max 2 sentences).
 2. If the user makes a grammar mistake, correct it using **bold** markdown.
