@@ -3,27 +3,39 @@
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useChat } from 'ai/react';
 import { LogOut, Mic, MicOff, Settings } from 'lucide-react';
 import { getSupabaseClient } from '../../../lib/supabaseClient';
 
+type ChatMessage = {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+};
+
 export default function AppChatPage() {
   const router = useRouter();
-  const { messages, append, isLoading } = useChat({
-    api: '/api/chat',
-    streamMode: 'text',
-  });
+
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
   const [status, setStatus] = useState('Toque no balao e fale em ingles');
   const [isListening, setIsListening] = useState(false);
   const [subtitleUser, setSubtitleUser] = useState('');
   const [subtitleAssistant, setSubtitleAssistant] = useState('');
   const [supportsSpeech, setSupportsSpeech] = useState(true);
+  const [voiceEnabled, setVoiceEnabled] = useState(false);
 
   const recognitionRef = useRef<any>(null);
   const synthRef = useRef<SpeechSynthesis | null>(null);
-  const autoListenRef = useRef(false);
+  const shouldAutoListenRef = useRef(false);
   const isSpeakingRef = useRef(false);
-  const lastSpokenAssistantIdRef = useRef('');
+  const pendingSendRef = useRef(false);
+  const interimTranscriptRef = useRef('');
+  const finalTranscriptRef = useRef('');
+  const messagesRef = useRef<ChatMessage[]>([]);
+
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
 
   useEffect(() => {
     const checkSession = async () => {
@@ -41,15 +53,19 @@ export default function AppChatPage() {
       setStatus('Seu navegador nao suporta reconhecimento de voz.');
       return;
     }
-    if (isLoading) return;
-    if (isSpeakingRef.current && synthRef.current) {
-      synthRef.current.cancel();
-      isSpeakingRef.current = false;
-    }
+    if (pendingSendRef.current || isLoading || isSpeakingRef.current) return;
     try {
       recognitionRef.current.start();
     } catch {
-      setStatus('Toque novamente para comecar a falar.');
+      setTimeout(() => {
+        if (shouldAutoListenRef.current && !pendingSendRef.current && !isSpeakingRef.current) {
+          try {
+            recognitionRef.current?.start();
+          } catch {
+            setStatus('Toque novamente para comecar a falar.');
+          }
+        }
+      }, 350);
     }
   }, [isLoading]);
 
@@ -61,23 +77,128 @@ export default function AppChatPage() {
     }
   }, []);
 
+  const speakAssistant = useCallback(
+    (text: string) => {
+      const cleanText = text.replace(/[*#]/g, '').trim();
+      if (!cleanText) return;
+
+      setSubtitleAssistant(cleanText);
+      if (!synthRef.current) {
+        if (shouldAutoListenRef.current) startListening();
+        return;
+      }
+
+      synthRef.current.cancel();
+      const utterance = new SpeechSynthesisUtterance(cleanText);
+      utterance.lang = 'en-US';
+      utterance.rate = 0.98;
+
+      utterance.onstart = () => {
+        isSpeakingRef.current = true;
+        setStatus('Professor falando...');
+      };
+
+      utterance.onend = () => {
+        isSpeakingRef.current = false;
+        setStatus('Sua vez. Fale novamente.');
+        if (shouldAutoListenRef.current) {
+          startListening();
+        }
+      };
+
+      utterance.onerror = () => {
+        isSpeakingRef.current = false;
+        setStatus('Falha no audio da resposta.');
+        if (shouldAutoListenRef.current) {
+          startListening();
+        }
+      };
+
+      synthRef.current.resume();
+      synthRef.current.speak(utterance);
+    },
+    [startListening],
+  );
+
   const sendTranscript = useCallback(
     async (spokenText: string) => {
       const cleaned = spokenText.trim();
-      if (!cleaned) return;
+      if (!cleaned || pendingSendRef.current) return;
+
+      pendingSendRef.current = true;
+      setIsLoading(true);
       setSubtitleUser(cleaned);
       setStatus('Professor pensando...');
+
+      const userMessage: ChatMessage = {
+        id: `u-${Date.now()}`,
+        role: 'user',
+        content: cleaned,
+      };
+
+      const history = [...messagesRef.current, userMessage];
+      setMessages(history);
+
       try {
-        await append({ role: 'user', content: cleaned });
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 20000);
+
+        const response = await fetch('/api/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            messages: history.map((m) => ({ role: m.role, content: m.content })),
+          }),
+          signal: controller.signal,
+        });
+
+        clearTimeout(timeout);
+
+        if (!response.ok) {
+          let message = 'Falha ao processar sua fala.';
+          try {
+            const errorJson = await response.json();
+            if (typeof errorJson?.error === 'string' && errorJson.error) {
+              message = errorJson.error;
+            }
+          } catch {
+            // ignore
+          }
+          throw new Error(message);
+        }
+
+        const assistantText = (await response.text()).trim();
+        const safeAssistantText =
+          assistantText || 'I did not catch that clearly. Could you repeat in one short sentence?';
+
+        const assistantMessage: ChatMessage = {
+          id: `a-${Date.now()}`,
+          role: 'assistant',
+          content: safeAssistantText,
+        };
+
+        setMessages([...history, assistantMessage]);
+        speakAssistant(safeAssistantText);
       } catch {
-        setStatus('Falha ao enviar sua fala. Tente novamente.');
+        const fallback = 'Nao consegui responder agora. Tente novamente em ingles.';
+        const assistantMessage: ChatMessage = {
+          id: `a-${Date.now()}`,
+          role: 'assistant',
+          content: fallback,
+        };
+        setMessages((prev) => [...prev, assistantMessage]);
+        speakAssistant(fallback);
+      } finally {
+        pendingSendRef.current = false;
+        setIsLoading(false);
       }
     },
-    [append],
+    [speakAssistant],
   );
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
+
     synthRef.current = window.speechSynthesis;
     const SpeechRecognition =
       // @ts-ignore webkit prefix for Chrome
@@ -99,85 +220,84 @@ export default function AppChatPage() {
       setStatus('Ouvindo voce...');
     };
 
-    recognition.onend = () => {
-      setIsListening(false);
-      if (!isSpeakingRef.current && !isLoading) {
-        setStatus('Toque no balao e fale em ingles');
-      }
-    };
-
-    recognition.onerror = () => {
-      setIsListening(false);
-      setStatus('Erro no microfone. Verifique a permissao.');
-    };
-
     recognition.onresult = (event: any) => {
       let finalText = '';
       let interimText = '';
+
       for (let i = event.resultIndex; i < event.results.length; i += 1) {
         const chunk = event.results[i][0]?.transcript || '';
         if (event.results[i].isFinal) finalText += chunk;
         else interimText += chunk;
       }
 
+      interimTranscriptRef.current = interimText.trim();
       if (interimText.trim()) {
         setSubtitleUser(interimText.trim());
       }
 
       if (finalText.trim()) {
-        stopListening();
-        void sendTranscript(finalText);
+        finalTranscriptRef.current = finalText.trim();
+        setSubtitleUser(finalText.trim());
       }
     };
 
-    recognitionRef.current = recognition;
-    return () => recognition.stop();
-  }, [isLoading, sendTranscript, stopListening]);
+    recognition.onend = () => {
+      setIsListening(false);
 
-  useEffect(() => {
-    const lastAssistantMessage = [...messages]
-      .reverse()
-      .find((m) => m.role === 'assistant' && String(m.content).trim().length > 0);
+      const transcript = (finalTranscriptRef.current || interimTranscriptRef.current).trim();
+      if (transcript && !pendingSendRef.current) {
+        finalTranscriptRef.current = '';
+        interimTranscriptRef.current = '';
+        void sendTranscript(transcript);
+        return;
+      }
 
-    if (!lastAssistantMessage || isLoading) return;
-    if (lastAssistantMessage.id === lastSpokenAssistantIdRef.current) return;
+      if (shouldAutoListenRef.current && !pendingSendRef.current && !isSpeakingRef.current) {
+        startListening();
+        return;
+      }
 
-    const text = String(lastAssistantMessage.content).replace(/[*#]/g, '').trim();
-    if (!text) return;
-
-    lastSpokenAssistantIdRef.current = lastAssistantMessage.id;
-    setSubtitleAssistant(text);
-
-    if (!synthRef.current) return;
-
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.lang = 'en-US';
-    utterance.rate = 0.98;
-
-    utterance.onstart = () => {
-      isSpeakingRef.current = true;
-      setStatus('Professor falando...');
+      setStatus('Toque no balao e fale em ingles');
     };
 
-    utterance.onend = () => {
-      isSpeakingRef.current = false;
-      setStatus('Sua vez. Fale novamente.');
-      if (autoListenRef.current) {
+    recognition.onerror = (event: any) => {
+      setIsListening(false);
+      const code = event?.error || 'unknown';
+
+      if (code === 'not-allowed' || code === 'service-not-allowed') {
+        shouldAutoListenRef.current = false;
+        setVoiceEnabled(false);
+        setStatus('Permissao do microfone bloqueada no navegador.');
+        return;
+      }
+
+      if (code === 'no-speech') {
+        if (shouldAutoListenRef.current) {
+          setStatus('Nao ouvi sua fala. Tente novamente.');
+          startListening();
+        }
+        return;
+      }
+
+      setStatus('Erro no microfone. Verifique a permissao.');
+      if (shouldAutoListenRef.current && !pendingSendRef.current && !isSpeakingRef.current) {
         startListening();
       }
     };
 
-    utterance.onerror = () => {
-      isSpeakingRef.current = false;
-      setStatus('Falha no audio da resposta.');
-    };
+    recognitionRef.current = recognition;
 
-    synthRef.current.cancel();
-    synthRef.current.resume();
-    synthRef.current.speak(utterance);
-  }, [messages, isLoading, startListening]);
+    return () => {
+      recognition.stop();
+      synthRef.current?.cancel();
+    };
+  }, [sendTranscript, startListening]);
 
   const logout = async () => {
+    shouldAutoListenRef.current = false;
+    setVoiceEnabled(false);
+    stopListening();
+    synthRef.current?.cancel();
     await getSupabaseClient().auth.signOut();
     router.push('/auth/login');
     router.refresh();
@@ -190,9 +310,18 @@ export default function AppChatPage() {
   }, [isListening, isLoading]);
 
   const toggleVoice = () => {
-    autoListenRef.current = true;
-    if (isListening) stopListening();
-    else startListening();
+    const next = !voiceEnabled;
+    setVoiceEnabled(next);
+    shouldAutoListenRef.current = next;
+
+    if (!next) {
+      stopListening();
+      setStatus('Conversa por voz pausada.');
+      return;
+    }
+
+    setStatus('Ouvindo voce...');
+    startListening();
   };
 
   return (
