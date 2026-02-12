@@ -14,6 +14,7 @@ type ChatMessage = {
 
 export default function AppChatPage() {
   const router = useRouter();
+  const emptyReplyFallback = "I did not catch that clearly. Could you repeat in one short sentence?";
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -23,6 +24,9 @@ export default function AppChatPage() {
   const [subtitleAssistant, setSubtitleAssistant] = useState('');
   const [supportsSpeech, setSupportsSpeech] = useState(true);
   const [voiceEnabled, setVoiceEnabled] = useState(false);
+  const [apiStatus, setApiStatus] = useState<'idle' | 'ok' | 'error'>('idle');
+  const [lastApiMs, setLastApiMs] = useState<number | null>(null);
+  const [voiceStatus, setVoiceStatus] = useState<'idle' | 'ok' | 'error'>('idle');
 
   const recognitionRef = useRef<any>(null);
   const synthRef = useRef<SpeechSynthesis | null>(null);
@@ -84,6 +88,7 @@ export default function AppChatPage() {
 
       setSubtitleAssistant(cleanText);
       if (!synthRef.current) {
+        setVoiceStatus('error');
         if (shouldAutoListenRef.current) startListening();
         return;
       }
@@ -92,9 +97,16 @@ export default function AppChatPage() {
       const utterance = new SpeechSynthesisUtterance(cleanText);
       utterance.lang = 'en-US';
       utterance.rate = 0.98;
+      const voices = synthRef.current.getVoices();
+      const preferred =
+        voices.find((v) => v.lang?.toLowerCase().startsWith('en-us')) ||
+        voices.find((v) => v.lang?.toLowerCase().startsWith('en')) ||
+        null;
+      if (preferred) utterance.voice = preferred;
 
       utterance.onstart = () => {
         isSpeakingRef.current = true;
+        setVoiceStatus('ok');
         setStatus('Professor falando...');
       };
 
@@ -108,6 +120,7 @@ export default function AppChatPage() {
 
       utterance.onerror = () => {
         isSpeakingRef.current = false;
+        setVoiceStatus('error');
         setStatus('Falha no audio da resposta.');
         if (shouldAutoListenRef.current) {
           startListening();
@@ -119,6 +132,53 @@ export default function AppChatPage() {
     },
     [startListening],
   );
+
+  const requestAssistant = useCallback(async (history: ChatMessage[]) => {
+    const startedAt = Date.now();
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 20000);
+    try {
+      const response = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages: history.map((m) => ({ role: m.role, content: m.content })),
+        }),
+        signal: controller.signal,
+      });
+
+      const elapsed = Date.now() - startedAt;
+      setLastApiMs(elapsed);
+
+      if (!response.ok) {
+        setApiStatus('error');
+        let message = 'Falha ao processar sua fala.';
+        try {
+          const errorJson = await response.json();
+          if (typeof errorJson?.error === 'string' && errorJson.error) {
+            message = errorJson.error;
+          }
+        } catch {
+          // ignore
+        }
+        throw new Error(message);
+      }
+
+      let assistantText = '';
+      const contentType = response.headers.get('content-type') || '';
+      if (contentType.includes('application/json')) {
+        const json = await response.json();
+        assistantText = String(json?.content || '').trim();
+      } else {
+        assistantText = (await response.text()).trim();
+      }
+
+      setApiStatus('ok');
+      return assistantText;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }, []);
 
   const sendTranscript = useCallback(
     async (spokenText: string) => {
@@ -140,36 +200,12 @@ export default function AppChatPage() {
       setMessages(history);
 
       try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 20000);
-
-        const response = await fetch('/api/chat', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            messages: history.map((m) => ({ role: m.role, content: m.content })),
-          }),
-          signal: controller.signal,
-        });
-
-        clearTimeout(timeout);
-
-        if (!response.ok) {
-          let message = 'Falha ao processar sua fala.';
-          try {
-            const errorJson = await response.json();
-            if (typeof errorJson?.error === 'string' && errorJson.error) {
-              message = errorJson.error;
-            }
-          } catch {
-            // ignore
-          }
-          throw new Error(message);
+        const compactHistory = history.slice(-10);
+        let assistantText = await requestAssistant(compactHistory);
+        if (!assistantText || assistantText === emptyReplyFallback) {
+          assistantText = await requestAssistant([userMessage]);
         }
-
-        const assistantText = (await response.text()).trim();
-        const safeAssistantText =
-          assistantText || 'I did not catch that clearly. Could you repeat in one short sentence?';
+        const safeAssistantText = assistantText || emptyReplyFallback;
 
         const assistantMessage: ChatMessage = {
           id: `a-${Date.now()}`,
@@ -180,6 +216,7 @@ export default function AppChatPage() {
         setMessages([...history, assistantMessage]);
         speakAssistant(safeAssistantText);
       } catch {
+        setApiStatus('error');
         const fallback = 'Nao consegui responder agora. Tente novamente em ingles.';
         const assistantMessage: ChatMessage = {
           id: `a-${Date.now()}`,
@@ -193,7 +230,7 @@ export default function AppChatPage() {
         setIsLoading(false);
       }
     },
-    [speakAssistant],
+    [emptyReplyFallback, requestAssistant, speakAssistant],
   );
 
   useEffect(() => {
@@ -267,6 +304,7 @@ export default function AppChatPage() {
       if (code === 'not-allowed' || code === 'service-not-allowed') {
         shouldAutoListenRef.current = false;
         setVoiceEnabled(false);
+        setVoiceStatus('error');
         setStatus('Permissao do microfone bloqueada no navegador.');
         return;
       }
@@ -280,6 +318,7 @@ export default function AppChatPage() {
       }
 
       setStatus('Erro no microfone. Verifique a permissao.');
+      setVoiceStatus('error');
       if (shouldAutoListenRef.current && !pendingSendRef.current && !isSpeakingRef.current) {
         startListening();
       }
@@ -366,6 +405,15 @@ export default function AppChatPage() {
             <span className="font-semibold text-slate-900">Professor:</span>{' '}
             {subtitleAssistant || 'A resposta em voz aparecera aqui como legenda.'}
           </p>
+          <div className="pt-2 text-xs text-slate-500">
+            <span className="mr-4">
+              API: {apiStatus === 'ok' ? 'ok' : apiStatus === 'error' ? 'erro' : 'aguardando'}
+              {lastApiMs ? ` (${lastApiMs}ms)` : ''}
+            </span>
+            <span>
+              Voz: {voiceStatus === 'ok' ? 'ok' : voiceStatus === 'error' ? 'erro' : 'aguardando'}
+            </span>
+          </div>
         </div>
       </div>
     </div>
