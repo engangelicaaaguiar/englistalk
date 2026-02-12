@@ -10,10 +10,20 @@ import {
 import { getSupabaseAdmin } from '../../../lib/supabaseAdmin';
 
 export const maxDuration = 30;
-const PRIMARY_MODEL = 'llama-3.3-70b-versatile';
+const MODEL_FALLBACK_CHAIN = [
+  'llama-3.3-70b-versatile',
+  'llama-3.1-8b-instant',
+  'openai/gpt-oss-20b',
+] as const;
+const HTTP_EMPTY_OUTPUT_RECOVERY_MODELS = new Set<ModelId>([
+  'llama-3.1-8b-instant',
+  'openai/gpt-oss-20b',
+]);
 const PRIMARY_TEMPERATURE = 0.7;
 const PRIMARY_MAX_TOKENS = 150;
 const PRIMARY_PRESENCE_PENALTY = 0.6;
+
+type ModelId = (typeof MODEL_FALLBACK_CHAIN)[number];
 
 type ProfilePayload = {
   userId: string;
@@ -65,6 +75,440 @@ type TransitionEval = {
   shortenResponse: boolean;
 };
 
+type TurnIntent =
+  | 'language_gap'
+  | 'feedback'
+  | 'help_me'
+  | 'upgrade'
+  | 'start'
+  | 'greeting'
+  | 'how_are_you'
+  | 'how_was_day'
+  | 'preference'
+  | 'routine'
+  | 'location'
+  | 'family'
+  | 'ability'
+  | 'open_question'
+  | 'statement'
+  | 'fragment';
+
+const SEMANTIC_STOP_WORDS = new Set([
+  'the',
+  'and',
+  'but',
+  'for',
+  'with',
+  'that',
+  'this',
+  'your',
+  'have',
+  'has',
+  'was',
+  'were',
+  'are',
+  'you',
+  'how',
+  'what',
+  'where',
+  'when',
+  'which',
+  'who',
+  'why',
+  'can',
+  'could',
+  'would',
+  'should',
+  'does',
+  'did',
+  'do',
+  'is',
+  'it',
+  'my',
+  'today',
+  'really',
+  'very',
+]);
+
+const WORD_HINTS_PT: Record<string, string> = {
+  great: 'otimo',
+  relaxed: 'relaxado',
+  productive: 'produtivo',
+  routine: 'rotina',
+  prefer: 'preferir',
+  neighborhood: 'bairro',
+  siblings: 'irmaos',
+  recipe: 'receita',
+  confident: 'confiante',
+  improve: 'melhorar',
+};
+
+type ModelAttemptFailure = {
+  model: ModelId;
+  stage: 'primary' | 'retry' | 'persona_rewrite';
+  status: number | null;
+  category: 'rate_limit' | 'timeout' | 'provider' | 'auth' | 'empty_output' | 'unknown';
+  name: string;
+  error: string;
+};
+
+type GenerateWithModelFallbackParams = {
+  groq: ReturnType<typeof createGroq>;
+  apiKey: string;
+  stage: 'primary' | 'retry' | 'persona_rewrite';
+  system?: string;
+  messages?: any;
+  prompt?: string;
+  maxTokens?: number;
+  temperature?: number;
+  presencePenalty?: number;
+};
+
+type GenerateWithModelFallbackResult = {
+  text: string;
+  modelUsed: ModelId;
+  attempts: ModelAttemptFailure[];
+};
+
+function normalizeChatContent(content: any): string {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => (typeof part?.text === 'string' ? part.text : ''))
+      .join(' ')
+      .trim();
+  }
+  return '';
+}
+
+function buildGroqHttpMessages(params: {
+  system?: string;
+  messages?: any;
+  prompt?: string;
+}) {
+  const payloadMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [];
+  if (typeof params.system === 'string' && params.system.trim()) {
+    payloadMessages.push({ role: 'system', content: params.system.trim() });
+  }
+
+  if (Array.isArray(params.messages) && params.messages.length > 0) {
+    for (const msg of params.messages) {
+      const role = msg?.role === 'assistant' ? 'assistant' : msg?.role === 'system' ? 'system' : 'user';
+      const content = normalizeChatContent(msg?.content);
+      if (!content) continue;
+      payloadMessages.push({ role, content });
+    }
+  } else if (typeof params.prompt === 'string' && params.prompt.trim()) {
+    payloadMessages.push({ role: 'user', content: params.prompt.trim() });
+  }
+
+  return payloadMessages;
+}
+
+async function recoverFromEmptyOutputViaHttp(params: {
+  apiKey: string;
+  modelId: ModelId;
+  system?: string;
+  messages?: any;
+  prompt?: string;
+  maxTokens?: number;
+  temperature?: number;
+  presencePenalty?: number;
+}) {
+  const messages = buildGroqHttpMessages({
+    system: params.system,
+    messages: params.messages,
+    prompt: params.prompt,
+  });
+
+  if (messages.length === 0) {
+    return {
+      ok: false as const,
+      status: null,
+      category: 'empty_output' as const,
+      name: 'HttpFallbackNoMessages',
+      error: 'HTTP fallback skipped because message payload is empty.',
+    };
+  }
+
+  const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${params.apiKey}`,
+    },
+    body: JSON.stringify({
+      model: params.modelId,
+      messages,
+      temperature: params.temperature ?? PRIMARY_TEMPERATURE,
+      max_tokens: params.maxTokens ?? PRIMARY_MAX_TOKENS,
+      presence_penalty: params.presencePenalty ?? PRIMARY_PRESENCE_PENALTY,
+    }),
+  });
+
+  const rawBody = await response.text();
+  let parsed: any = null;
+  try {
+    parsed = rawBody ? JSON.parse(rawBody) : null;
+  } catch {
+    parsed = null;
+  }
+
+  if (!response.ok) {
+    const errMsg = String(parsed?.error?.message || rawBody || 'unknown http fallback error');
+    let category: ModelAttemptFailure['category'] = 'unknown';
+    const lowered = errMsg.toLowerCase();
+    if (response.status === 401 || response.status === 403 || lowered.includes('invalid api key')) {
+      category = 'auth';
+    } else if (
+      response.status === 429 ||
+      lowered.includes('rate limit') ||
+      lowered.includes('tokens per day') ||
+      lowered.includes('quota')
+    ) {
+      category = 'rate_limit';
+    } else if (
+      response.status === 408 ||
+      lowered.includes('timeout') ||
+      lowered.includes('timed out')
+    ) {
+      category = 'timeout';
+    } else if (
+      [500, 502, 503, 504, 529].includes(response.status) ||
+      lowered.includes('service unavailable') ||
+      lowered.includes('provider')
+    ) {
+      category = 'provider';
+    }
+
+    return {
+      ok: false as const,
+      status: response.status,
+      category,
+      name: 'HttpFallbackError',
+      error: errMsg.slice(0, 320),
+    };
+  }
+
+  const content = String(parsed?.choices?.[0]?.message?.content || '').trim();
+  if (!content) {
+    return {
+      ok: false as const,
+      status: response.status,
+      category: 'empty_output' as const,
+      name: 'HttpFallbackEmptyContent',
+      error: 'HTTP fallback returned success but empty message content.',
+    };
+  }
+
+  return {
+    ok: true as const,
+    text: content,
+    status: response.status,
+  };
+}
+
+function shouldFallbackToNextModel(error: any) {
+  const message = String(error?.message || '').toLowerCase();
+  const status = Number(error?.statusCode || error?.status || 0);
+  const retryablePatterns = [
+    'rate limit',
+    'tokens per day',
+    'tokens per minute',
+    'requests per minute',
+    'requests per day',
+    'tpd',
+    'tpm',
+    'rpm',
+    'rpd',
+    'quota',
+    'capacity',
+    'temporarily unavailable',
+    'service unavailable',
+    'model unavailable',
+    'overloaded',
+    'too many requests',
+    'failed after',
+  ];
+
+  if (status === 429 || status === 503 || status === 529) return true;
+  if (error?.name === 'AI_RetryError') return true;
+  return retryablePatterns.some((pattern) => message.includes(pattern));
+}
+
+function summarizeError(error: any) {
+  const rawMessage = String(error?.message || error || '').replace(/\s+/g, ' ').trim();
+  const statusCandidates = [
+    error?.statusCode,
+    error?.status,
+    error?.response?.status,
+    error?.cause?.status,
+    error?.cause?.statusCode,
+  ];
+  const status = statusCandidates.find((value: any) => Number.isFinite(Number(value)));
+  const numericStatus = typeof status === 'undefined' ? null : Number(status);
+  const lowered = rawMessage.toLowerCase();
+
+  let category: ModelAttemptFailure['category'] = 'unknown';
+  if (numericStatus === 401 || numericStatus === 403 || lowered.includes('invalid api key')) {
+    category = 'auth';
+  } else if (
+    numericStatus === 429 ||
+    lowered.includes('rate limit') ||
+    lowered.includes('tokens per day') ||
+    lowered.includes('tokens per minute') ||
+    lowered.includes('quota')
+  ) {
+    category = 'rate_limit';
+  } else if (
+    numericStatus === 408 ||
+    lowered.includes('timeout') ||
+    lowered.includes('timed out') ||
+    lowered.includes('aborted')
+  ) {
+    category = 'timeout';
+  } else if (
+    numericStatus === 500 ||
+    numericStatus === 502 ||
+    numericStatus === 503 ||
+    numericStatus === 504 ||
+    numericStatus === 529 ||
+    lowered.includes('service unavailable') ||
+    lowered.includes('model unavailable') ||
+    lowered.includes('provider')
+  ) {
+    category = 'provider';
+  }
+
+  return {
+    status: numericStatus,
+    category,
+    name: String(error?.name || 'Error'),
+    message: rawMessage.slice(0, 320),
+  };
+}
+
+async function generateTextWithModelFallback(
+  params: GenerateWithModelFallbackParams,
+): Promise<GenerateWithModelFallbackResult> {
+  const attempts: ModelAttemptFailure[] = [];
+  let lastError: any = null;
+
+  for (const modelId of MODEL_FALLBACK_CHAIN) {
+    try {
+      const options: any = {
+        model: params.groq(modelId) as any,
+        maxTokens: params.maxTokens ?? PRIMARY_MAX_TOKENS,
+        temperature: params.temperature ?? PRIMARY_TEMPERATURE,
+      };
+
+      if (typeof params.presencePenalty === 'number') {
+        options.presencePenalty = params.presencePenalty;
+      }
+      if (typeof params.system === 'string') options.system = params.system;
+      if (params.messages) options.messages = params.messages;
+      if (typeof params.prompt === 'string') options.prompt = params.prompt;
+
+      const generated = await generateText(options);
+      const text = (generated.text || '').trim();
+      if (!text) {
+        const emptyAttempt: ModelAttemptFailure = {
+          model: modelId,
+          stage: params.stage,
+          status: null,
+          category: 'empty_output',
+          name: 'EmptyTextResponse',
+          error: 'Model returned success but empty text payload.',
+        };
+        attempts.push(emptyAttempt);
+        console.warn(
+          `[talken:model-fallback] stage=${params.stage} model=${modelId} status=n/a category=empty_output name=EmptyTextResponse message="Model returned success but empty text payload."`,
+        );
+
+        if (HTTP_EMPTY_OUTPUT_RECOVERY_MODELS.has(modelId)) {
+          try {
+            const recovered = await recoverFromEmptyOutputViaHttp({
+              apiKey: params.apiKey,
+              modelId,
+              system: params.system,
+              messages: params.messages,
+              prompt: params.prompt,
+              maxTokens: params.maxTokens,
+              temperature: params.temperature,
+              presencePenalty: params.presencePenalty,
+            });
+
+            if (recovered.ok) {
+              console.info(
+                `[talken:model-fallback] stage=${params.stage} model=${modelId} recovery=http status=${recovered.status} category=ok`,
+              );
+              return {
+                text: recovered.text,
+                modelUsed: modelId,
+                attempts,
+              };
+            }
+
+            attempts.push({
+              model: modelId,
+              stage: params.stage,
+              status: recovered.status,
+              category: recovered.category,
+              name: recovered.name,
+              error: recovered.error,
+            });
+            console.warn(
+              `[talken:model-fallback] stage=${params.stage} model=${modelId} recovery=http status=${recovered.status ?? 'n/a'} category=${recovered.category} name=${recovered.name} message="${recovered.error}"`,
+            );
+          } catch (httpError: any) {
+            const meta = summarizeError(httpError);
+            attempts.push({
+              model: modelId,
+              stage: params.stage,
+              status: meta.status,
+              category: meta.category,
+              name: 'HttpFallbackException',
+              error: meta.message,
+            });
+            console.warn(
+              `[talken:model-fallback] stage=${params.stage} model=${modelId} recovery=http status=${meta.status ?? 'n/a'} category=${meta.category} name=HttpFallbackException message="${meta.message}"`,
+            );
+          }
+        }
+        continue;
+      }
+
+      return {
+        text,
+        modelUsed: modelId,
+        attempts,
+      };
+    } catch (error: any) {
+      lastError = error;
+      const meta = summarizeError(error);
+      attempts.push({
+        model: modelId,
+        stage: params.stage,
+        status: meta.status,
+        category: meta.category,
+        name: meta.name,
+        error: meta.message,
+      });
+      console.warn(
+        `[talken:model-fallback] stage=${params.stage} model=${modelId} status=${meta.status ?? 'n/a'} category=${meta.category} name=${meta.name} message="${meta.message}"`,
+      );
+
+      if (!shouldFallbackToNextModel(error)) break;
+    }
+  }
+
+  const trace = attempts.map((a) => `${a.model}: ${a.error}`).join(' | ');
+  const reason = String(lastError?.message || 'unknown model fallback error');
+  const fallbackError = new Error(`Model fallback failed. Last error: ${reason}. Attempts: ${trace}`);
+  (fallbackError as any).attempts = attempts;
+  throw fallbackError;
+}
+
 function tokenCount(text: string | undefined) {
   if (!text) return 0;
   return text
@@ -107,6 +551,96 @@ function detectPlanningDone(text: string) {
 
 function detectReportEnd(text: string) {
   return /\b(that'?s all|all done|finished|done|encerrado|fim|end)\b/i.test(text);
+}
+
+function isFeedbackIntent(text: string) {
+  return /\b(feedback|review my answer|avaliacao|avaliação)\b/i.test(text);
+}
+
+function isLanguageGapIntent(text: string) {
+  return /\b(language gap|gap analysis|native would speak|native would say)\b/i.test(text);
+}
+
+function extractPreferenceOptions(text: string) {
+  const match = text.match(/\bprefer\s+([a-z ]+?)\s+or\s+([a-z ]+?)(?:\?|$)/i);
+  if (!match) return null;
+  return {
+    first: match[1].trim().toLowerCase(),
+    second: match[2].trim().toLowerCase(),
+  };
+}
+
+function normalizeSemanticWords(text: string) {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9'\s]/g, ' ')
+    .split(/\s+/)
+    .filter((word) => word.length >= 3 && !SEMANTIC_STOP_WORDS.has(word));
+}
+
+function detectTurnIntent(params: {
+  text: string;
+  helpMeMode: boolean;
+  upgradeMode: boolean;
+  feedbackMode: boolean;
+  languageGapMode: boolean;
+}): TurnIntent {
+  const { text, helpMeMode, upgradeMode, feedbackMode, languageGapMode } = params;
+  const normalized = text.toLowerCase().trim();
+
+  if (languageGapMode || /language gap/.test(normalized)) return 'language_gap';
+  if (feedbackMode || /feedback/.test(normalized)) return 'feedback';
+  if (helpMeMode) return 'help_me';
+  if (upgradeMode) return 'upgrade';
+  if (detectStartIntent(normalized)) return 'start';
+  if (/\b(hi|hello|hey|good morning|good afternoon|good evening)\b/.test(normalized)) return 'greeting';
+  if (/\bhow are you|how's it going|how do you feel\b/.test(normalized)) return 'how_are_you';
+  if (/\bhow was your day|how is your day|how was today|how was your day today\b/.test(normalized)) return 'how_was_day';
+  if (/\bprefer\b/.test(normalized) && /\bor\b/.test(normalized)) return 'preference';
+  if (/\b(weekend|weekends|usually do|routine)\b/.test(normalized)) return 'routine';
+  if (/\b(where do you live|big city|small city|city)\b/.test(normalized)) return 'location';
+  if (/\b(brother|brothers|sister|sisters|siblings|family)\b/.test(normalized)) return 'family';
+  if (/\b(can you cook|can you)\b/.test(normalized)) return 'ability';
+  if (normalized.endsWith('?')) return 'open_question';
+  if (tokenCount(normalized) <= 4) return 'fragment';
+  return 'statement';
+}
+
+function intentConversationDirective(intent: TurnIntent, level: CEFRLevel) {
+  const levelHint =
+    level === 'A1' || level === 'A2'
+      ? 'Use very simple short English and avoid abstract explanations.'
+      : 'Keep language natural and concise while maintaining pedagogical flow.';
+
+  if (intent === 'how_are_you' || intent === 'how_was_day') {
+    return `${levelHint} The student asked about you: answer naturally first, then invite the student to share their day.`;
+  }
+
+  if (intent === 'preference') {
+    return `${levelHint} The student asked about a preference: answer with one reason, then ask the same preference back.`;
+  }
+
+  if (intent === 'routine' || intent === 'location' || intent === 'family' || intent === 'ability') {
+    return `${levelHint} Answer the student question directly in one short sentence, add one natural detail, then ask one related follow-up.`;
+  }
+
+  if (intent === 'fragment') {
+    return `${levelHint} Student gave a fragment: gently complete it into a natural sentence and ask a simple continuation question.`;
+  }
+
+  if (intent === 'start' || intent === 'greeting') {
+    return `${levelHint} Open warmly and naturally, then ask one easy question to keep the student speaking.`;
+  }
+
+  if (intent === 'help_me' || intent === 'upgrade') {
+    return 'Provide one concise chunk upgrade and immediately continue the conversation with one easy question.';
+  }
+
+  if (intent === 'feedback' || intent === 'language_gap') {
+    return 'Provide concise feedback anchored to learner wording, then ask for one repetition or reformulation.';
+  }
+
+  return `${levelHint} React to meaning, keep 2-3 short sentences, and end with one easy follow-up question.`;
 }
 
 function estimatePtRatio(text: string) {
@@ -175,12 +709,12 @@ function detectOutcomeAchieved(moduleName: LearningModule, recentMessages: Array
     return /\b(meeting|deadline|status|deliverable|client|proposal|agree|decision)\b/.test(userText);
   }
   if (moduleName === 'Social_Small_Talk') {
-    return /\b(hobby|weekend|family|friend|music|movie|like|enjoy)\b/.test(userText);
+    return false;
   }
   if (moduleName === 'Exam_Preparation') {
     return /\b(on the one hand|on the other hand|however|in conclusion|argument|counterpoint)\b/.test(userText);
   }
-  return /\b(today|yesterday|routine|work|study|plan|because)\b/.test(userText);
+  return false;
 }
 
 function evaluateTransition(params: {
@@ -189,16 +723,58 @@ function evaluateTransition(params: {
   moduleName: LearningModule;
   recentMessages: Array<{ role: string; content: string }>;
   metrics: RuntimeMetrics;
+  helpMeIntent: boolean;
+  upgradeIntent: boolean;
+  feedbackIntent: boolean;
+  languageGapIntent: boolean;
 }) {
-  const { phase, lastUserText, moduleName, recentMessages, metrics } = params;
+  const {
+    phase,
+    lastUserText,
+    moduleName,
+    recentMessages,
+    metrics,
+    helpMeIntent,
+    upgradeIntent,
+    feedbackIntent,
+    languageGapIntent,
+  } = params;
   const outcomeAchieved = detectOutcomeAchieved(moduleName, recentMessages);
   const gentleScaffolding = metrics.ptRatio >= 0.35 || metrics.shortMessageStreak >= 2;
   const shortenResponse = metrics.teacherTalkPct > 30;
+  const openConversationModule =
+    moduleName === 'Daily_Conversation' || moduleName === 'Social_Small_Talk';
 
   let nextPhase = phase;
   let reason = 'no_transition';
 
-  if (phase === 'pre_task' && (detectStartIntent(lastUserText) || tokenCount(lastUserText) >= 5)) {
+  if (openConversationModule) {
+    if (phase === 'pre_task' && (detectStartIntent(lastUserText) || tokenCount(lastUserText) >= 2)) {
+      nextPhase = 'task_cycle';
+      reason = 'conversation_started';
+    } else if (
+      (phase === 'task_cycle' || phase === 'pre_task') &&
+      (feedbackIntent || languageGapIntent)
+    ) {
+      nextPhase = 'language_focus';
+      reason = 'feedback_requested';
+    } else if (phase === 'task_cycle' && (helpMeIntent || upgradeIntent)) {
+      nextPhase = 'planning_refine';
+      reason = 'micro_refinement_requested';
+    } else if (phase === 'planning_refine' && detectPlanningDone(lastUserText)) {
+      nextPhase = 'report';
+      reason = 'refinement_done';
+    } else if (phase === 'planning_refine' && !(helpMeIntent || upgradeIntent)) {
+      nextPhase = 'task_cycle';
+      reason = 'return_to_conversation';
+    } else if (phase === 'report' && (detectReportEnd(lastUserText) || feedbackIntent || languageGapIntent)) {
+      nextPhase = 'language_focus';
+      reason = 'report_completed';
+    } else if (phase === 'language_focus' && !(feedbackIntent || languageGapIntent)) {
+      nextPhase = 'task_cycle';
+      reason = 'resume_conversation';
+    }
+  } else if (phase === 'pre_task' && (detectStartIntent(lastUserText) || tokenCount(lastUserText) >= 5)) {
     nextPhase = 'task_cycle';
     reason = 'start_intent_detected';
   } else if (phase === 'task_cycle' && outcomeAchieved) {
@@ -628,6 +1204,8 @@ function buildSystemPrompt(
   profile: ProfilePayload,
   isFirstTurn: boolean,
   phase: BrainPhase,
+  turnIntent: TurnIntent,
+  turnIntentDirective: string,
   scenario: string,
   emergentHints: string,
   sttDirective: string,
@@ -653,6 +1231,8 @@ function buildSystemPrompt(
     `Authentic scenario now: ${scenario}.`,
     `Pedagogical role now: ${transition.role}.`,
     `Transition reason: ${transition.reason}.`,
+    `Detected turn intent: ${turnIntent}.`,
+    `Intent handling directive: ${turnIntentDirective}`,
     phaseMethodology(phase),
     sttDirective,
     emergentHints,
@@ -688,6 +1268,73 @@ function buildSystemPrompt(
   ].join('\n');
 }
 
+function pickTeachingWord(params: {
+  level: CEFRLevel;
+  intent: TurnIntent;
+  weakWords: string[];
+  recentAssistantMessages: string[];
+}) {
+  const { level, intent, weakWords, recentAssistantMessages } = params;
+  const history = recentAssistantMessages.join(' ').toLowerCase();
+
+  const defaultsByIntent: Record<TurnIntent, string[]> = {
+    language_gap: ['upgrade', 'nuance', 'confident'],
+    feedback: ['improve', 'clear', 'natural'],
+    help_me: ['phrase', 'chunk', 'request'],
+    upgrade: ['confident', 'persuasive', 'impact'],
+    start: ['great', 'ready', 'focus'],
+    greeting: ['great', 'happy', 'ready'],
+    how_are_you: ['fine', 'calm', 'productive'],
+    how_was_day: ['busy', 'relaxed', 'productive'],
+    preference: ['prefer', 'favorite', 'instead'],
+    routine: ['usually', 'often', 'sometimes'],
+    location: ['neighborhood', 'downtown', 'quiet'],
+    family: ['siblings', 'close', 'supportive'],
+    ability: ['cook', 'recipe', 'practice'],
+    open_question: ['clear', 'explain', 'example'],
+    statement: ['improve', 'detail', 'clear'],
+    fragment: ['complete', 'detail', 'because'],
+  };
+
+  const levelBias: Record<CEFRLevel, string[]> = {
+    A1: ['great', 'happy', 'busy', 'usually'],
+    A2: ['because', 'often', 'prefer', 'routine'],
+    B1: ['confident', 'improve', 'describe', 'example'],
+    B2: ['persuasive', 'impact', 'structured', 'nuance'],
+    C1: ['compelling', 'precise', 'strategic', 'refine'],
+    C2: ['nuance', 'framing', 'subtle', 'sophisticated'],
+  };
+
+  const pool = [...weakWords, ...defaultsByIntent[intent], ...levelBias[level]]
+    .map((word) => word.trim().toLowerCase())
+    .filter(Boolean);
+
+  for (const word of pool) {
+    if (!history.includes(word)) return word;
+  }
+
+  return pool[0] || 'clear';
+}
+
+function englishHintLine(word: string, level: CEFRLevel) {
+  if (!word) return '';
+  const hint = WORD_HINTS_PT[word];
+  if (!hint) {
+    if (level === 'A1' || level === 'A2') return '';
+    return ` Useful word: "${word}".`;
+  }
+  return ` New word: "${word}" means "${hint}".`;
+}
+
+function completeFragment(text: string) {
+  const clean = text.replace(/"/g, '').trim();
+  if (!clean) return '';
+  if (/[.!?]$/.test(clean)) return clean;
+  if (/\b(is|am|are|was|were|be|seems|feels)\s*$/i.test(clean)) return `${clean} very good today.`;
+  if (/\b(to|for|with|at|in|on)\s*$/i.test(clean)) return `${clean} my family.`;
+  return `${clean}.`;
+}
+
 function levelFallback(
   profile: ProfilePayload,
   lastUserMessage: string | undefined,
@@ -695,16 +1342,27 @@ function levelFallback(
   phase: BrainPhase,
   helpMeMode: boolean,
   upgradeMode: boolean,
+  turnIntent: TurnIntent,
+  weakWords: string[],
+  recentAssistantMessages: string[],
 ) {
   const studentText = (lastUserMessage || '').trim();
   const normalizedStudent = studentText.replace(/\s+/g, ' ').trim();
   const lower = normalizedStudent.toLowerCase();
+  const teachingWord = pickTeachingWord({
+    level: profile.currentLevel,
+    intent: turnIntent,
+    weakWords,
+    recentAssistantMessages,
+  });
+  const hintLine = englishHintLine(teachingWord, profile.currentLevel);
+  const preference = extractPreferenceOptions(lower);
 
-  if (/language gap/.test(lower)) {
+  if (turnIntent === 'language_gap') {
     return '[gentle] Great request. Language Gap: you said "I want more money," while a native professional version is "Based on my impact, I would like to discuss a compensation adjustment." Can you repeat that upgraded sentence once?';
   }
 
-  if (/feedback/.test(lower) || /i'?m done with the task/.test(lower)) {
+  if (turnIntent === 'feedback' || /i'?m done with the task/.test(lower)) {
     return '[cheerful] Excellent work, you completed the task. Quick feedback: your message is clear, and the main upgrade is using "I would like to discuss..." instead of "I want...". Can you deliver your final polished version in one sentence?';
   }
 
@@ -725,26 +1383,71 @@ function levelFallback(
   }
 
   if (isFirstTurn) {
-    if (profile.currentLevel === 'A1' || profile.currentLevel === 'A2') {
-      return '[cheerful] Hi! It is great to meet you, and I am happy to practice with you today. New word: "great" means "otimo". How are you feeling today?';
+    if (profile.currentLevel === 'A1' || profile.currentLevel === 'A2' || turnIntent === 'greeting') {
+      return `[cheerful] Hi! I am really happy to talk with you today.${hintLine} How are you feeling now?`;
     }
-    return '[cheerful] Great, let us start the job interview roleplay. New word: "strengths" means your best professional qualities. What are your top two strengths for this role?';
+    return `[cheerful] Great, let us start the roleplay and keep it natural.${hintLine} What is the first thing you want to say?`;
+  }
+
+  if (turnIntent === 'how_are_you') {
+    return `[cheerful] I am doing well today, thanks for asking, and I am excited to practice with you.${hintLine} How are you feeling right now?`;
+  }
+
+  if (turnIntent === 'how_was_day') {
+    return `[gentle] My day was good and a little busy, in a good way.${hintLine} How was your day today?`;
+  }
+
+  if (turnIntent === 'preference') {
+    if (preference) {
+      return `[cheerful] I usually prefer ${preference.first} because it helps me focus.${hintLine} What about you, do you prefer ${preference.first} or ${preference.second}?`;
+    }
+    return `[cheerful] I usually pick what matches the moment, but I often have a favorite.${hintLine} What do you prefer most?`;
+  }
+
+  if (turnIntent === 'routine') {
+    return `[gentle] On weekends I usually rest, read, and take a short walk.${hintLine} What do you usually do on weekends?`;
+  }
+
+  if (turnIntent === 'location') {
+    const bigCityAsk = /\bbig city\b/.test(lower);
+    if (bigCityAsk) {
+      return `[gentle] I live in a big city, so life feels fast but interesting.${hintLine} Do you live in a big city or a quiet town?`;
+    }
+    return `[gentle] I live in a lively city area, and there is always something happening.${hintLine} Where do you live?`;
+  }
+
+  if (turnIntent === 'family') {
+    return `[cheerful] Yes, I have siblings, and we are very close.${hintLine} Do you have any brothers or sisters?`;
+  }
+
+  if (turnIntent === 'ability') {
+    return `[cheerful] Yes, I can cook simple meals, especially pasta and eggs.${hintLine} Can you cook, and what is your favorite dish?`;
+  }
+
+  if (turnIntent === 'open_question') {
+    return `[gentle] Great question, and I like your curiosity.${hintLine} What is your own answer to that question?`;
+  }
+
+  if (turnIntent === 'fragment') {
+    const completed = completeFragment(normalizedStudent);
+    if (completed) {
+      return `[gentle] Nice start, and I understood your idea. You can say: "${completed}"${hintLine} Can you add one more detail?`;
+    }
+    return '[gentle] Nice try, and we can build it together. Can you say one short sentence about your day?';
   }
 
   if (profile.currentLevel === 'A1') {
     if (studentText) {
-      const completed =
-        normalizedStudent.endsWith('.')
-          ? normalizedStudent
-          : `${normalizedStudent} good.`;
-      return `[gentle] Nice start, and I understood you well. You can say: "${completed}" New word: "busy" means "ocupado". How is your day today?`;
+      const completed = completeFragment(normalizedStudent);
+      return `[gentle] Nice start, and I understood you well. You can say: "${completed}"${hintLine} What happened next?`;
     }
     return '[gentle] Great start, you are doing well. Can you say one short sentence about your day?';
   }
 
   if (profile.currentLevel === 'A2') {
     if (studentText) {
-      return `[cheerful] Nice effort, and your sentence is clear. A natural way to say it is "${studentText}", and you can extend it with "because". Can you add one more idea using "because"?`;
+      const completed = completeFragment(normalizedStudent);
+      return `[cheerful] Nice effort, and your sentence is clear. A natural way to say it is "${completed}"${hintLine} Can you add one more idea using "because"?`;
     }
     return '[gentle] Good job so far. Can you tell me one thing you did yesterday?';
   }
@@ -773,7 +1476,7 @@ function levelFallback(
     return '[gentle] You are ready for a nuanced answer, and that is a great sign. Share one opinion and one counterpoint in a calm, persuasive way. What topic do you want to tackle first?';
   }
 
-  return 'Can you say one more sentence so we continue your fluency training?';
+  return '[gentle] Nice progress so far, and I am with you. Can you say one more sentence so we keep your fluency moving?';
 }
 
 function needsPersonaRewrite(text: string) {
@@ -804,16 +1507,43 @@ function needsPersonaRewrite(text: string) {
   return false;
 }
 
-function isOvergenericResponse(text: string) {
+function hasSemanticAnchor(assistantText: string, lastUserMessage: string) {
+  const userKeywords = normalizeSemanticWords(lastUserMessage).slice(0, 8);
+  if (userKeywords.length === 0) return true;
+
+  const assistantLower = assistantText.toLowerCase();
+  return userKeywords.some((keyword) => assistantLower.includes(keyword));
+}
+
+function isOvergenericResponse(
+  text: string,
+  lastUserMessage: string | undefined,
+  turnIntent: TurnIntent,
+) {
   const t = text.toLowerCase();
-  return (
-    t.includes("i really like where you're going with this idea") &&
-    t.includes('what tone do you want to project')
-  );
+  const genericTemplateMarkers = [
+    "i really like where you're going with this idea",
+    'what tone do you want to project',
+    'add three words',
+    'strong message',
+    'refined alternative',
+    'error detected',
+  ];
+
+  if (genericTemplateMarkers.some((marker) => t.includes(marker))) return true;
+  if (turnIntent === 'how_are_you' && !/\b(i am|i'm|doing well|good)\b/.test(t)) return true;
+  if (turnIntent === 'preference' && !/\bprefer\b/.test(t)) return true;
+  if (turnIntent === 'location' && !/\b(live|city|town)\b/.test(t)) return true;
+  if (turnIntent === 'family' && !/\b(sister|brother|siblings|family)\b/.test(t)) return true;
+  if (turnIntent === 'ability' && !/\b(can|cook)\b/.test(t)) return true;
+  if (lastUserMessage && !hasSemanticAnchor(text, lastUserMessage) && turnIntent !== 'feedback') return true;
+
+  return false;
 }
 
 async function rewriteWithPersonaGuard(
   groq: ReturnType<typeof createGroq>,
+  apiKey: string,
   profile: ProfilePayload,
   rawAssistantText: string,
   lastUserMessage: string | undefined,
@@ -835,14 +1565,16 @@ async function rewriteWithPersonaGuard(
     `Teacher reply to rewrite: ${rawAssistantText}`,
   ].join('\n');
 
-  const rewritten = await generateText({
-    model: groq(PRIMARY_MODEL) as any,
+  const rewritten = await generateTextWithModelFallback({
+    groq,
+    apiKey,
+    stage: 'persona_rewrite',
     prompt: rewritePrompt,
     maxTokens: 220,
     temperature: 0.35,
   });
 
-  return (rewritten.text || '').trim();
+  return rewritten;
 }
 
 export function GET() {
@@ -906,6 +1638,18 @@ export async function POST(req: Request) {
     const phase = brainSession?.phase || inferPhase(assistantTurns);
     const scenario = brainSession?.scenario || detectScenario(profile.currentModule);
     const emergentHints = await loadEmergentLanguageHints(brainSession);
+    const helpMeMode = isHelpMeIntent(safeLastUser);
+    const explicitUpgradeMode = isUpgradeIntent(safeLastUser);
+    const feedbackMode = isFeedbackIntent(safeLastUser);
+    const languageGapMode = isLanguageGapIntent(safeLastUser);
+    const turnIntent = detectTurnIntent({
+      text: safeLastUser,
+      helpMeMode,
+      upgradeMode: explicitUpgradeMode,
+      feedbackMode,
+      languageGapMode,
+    });
+    const turnIntentDirective = intentConversationDirective(turnIntent, profile.currentLevel);
     const metrics = computeRuntimeMetrics(recentMessages as any, safeLastUser);
     const transition = evaluateTransition({
       phase,
@@ -913,6 +1657,10 @@ export async function POST(req: Request) {
       moduleName: profile.currentModule,
       recentMessages: recentMessages as any,
       metrics,
+      helpMeIntent: helpMeMode,
+      upgradeIntent: explicitUpgradeMode,
+      feedbackIntent: feedbackMode,
+      languageGapIntent: languageGapMode,
     });
     const activePhase = transition.nextPhase;
     const affectiveState = detectAffectiveState(metrics);
@@ -924,8 +1672,7 @@ export async function POST(req: Request) {
       weakWords,
       emergentLog: hiddenLanguageLog,
     });
-    const helpMeMode = isHelpMeIntent(safeLastUser);
-    const upgradeMode = isUpgradeIntent(safeLastUser) || activePhase === 'language_focus';
+    const upgradeMode = explicitUpgradeMode || activePhase === 'language_focus';
     const chunkMinerDirective = helpMeMode
       ? 'Chunk Miner Mode: HELP_ME. Give one minimal lexical chunk that unblocks communication, then immediately continue roleplay in character.'
       : upgradeMode
@@ -940,10 +1687,14 @@ export async function POST(req: Request) {
     const groq = createGroq({ apiKey });
 
     let output = '';
+    let modelUsed: string = MODEL_FALLBACK_CHAIN[0];
+    let modelFallbackErrors: ModelAttemptFailure[] = [];
     const systemPrompt = buildSystemPrompt(
       profile,
       isFirstTurn,
       activePhase,
+      turnIntent,
+      turnIntentDirective,
       scenario,
       emergentHints,
       sttDirective,
@@ -952,16 +1703,24 @@ export async function POST(req: Request) {
       chunkMinerDirective,
     );
 
-    const firstTry = await generateText({
-      model: groq(PRIMARY_MODEL) as any,
-      system: systemPrompt,
-      messages: convertToCoreMessages(recentMessages as any),
-      maxTokens: PRIMARY_MAX_TOKENS,
-      temperature: PRIMARY_TEMPERATURE,
-      presencePenalty: PRIMARY_PRESENCE_PENALTY,
-    });
+    try {
+      const firstTry = await generateTextWithModelFallback({
+        groq,
+        apiKey,
+        stage: 'primary',
+        system: systemPrompt,
+        messages: convertToCoreMessages(recentMessages as any),
+        presencePenalty: PRIMARY_PRESENCE_PENALTY,
+      });
 
-    output = (firstTry.text || '').trim();
+      output = firstTry.text;
+      modelUsed = firstTry.modelUsed;
+      modelFallbackErrors = [...modelFallbackErrors, ...firstTry.attempts];
+    } catch (error: any) {
+      const attempts = Array.isArray(error?.attempts) ? error.attempts : [];
+      modelFallbackErrors = [...modelFallbackErrors, ...attempts];
+      console.error(`[talken:model-fallback] stage=primary exhausted error="${String(error?.message || error)}"`);
+    }
 
     if (!output) {
       const transcript = recentMessages
@@ -977,23 +1736,43 @@ export async function POST(req: Request) {
         'Reply as the teacher now with practical coaching and one follow-up question.',
       ].join('\n');
 
-      const retry = await generateText({
-        model: groq(PRIMARY_MODEL) as any,
-        prompt: retryPrompt,
-        maxTokens: PRIMARY_MAX_TOKENS,
-        temperature: PRIMARY_TEMPERATURE,
-        presencePenalty: PRIMARY_PRESENCE_PENALTY,
-      });
+      try {
+        const retry = await generateTextWithModelFallback({
+          groq,
+          apiKey,
+          stage: 'retry',
+          prompt: retryPrompt,
+          presencePenalty: PRIMARY_PRESENCE_PENALTY,
+        });
 
-      output = (retry.text || '').trim();
+        output = retry.text;
+        modelUsed = retry.modelUsed;
+        modelFallbackErrors = [...modelFallbackErrors, ...retry.attempts];
+      } catch (error: any) {
+        const attempts = Array.isArray(error?.attempts) ? error.attempts : [];
+        modelFallbackErrors = [...modelFallbackErrors, ...attempts];
+        console.error(`[talken:model-fallback] stage=retry exhausted error="${String(error?.message || error)}"`);
+      }
     }
 
     if (output && needsPersonaRewrite(output)) {
-      const rewritten = await rewriteWithPersonaGuard(groq, profile, output, lastUserMessage);
-      if (rewritten) output = rewritten;
+      try {
+        const rewritten = await rewriteWithPersonaGuard(groq, apiKey, profile, output, lastUserMessage);
+        if (rewritten.text) {
+          output = rewritten.text;
+          modelUsed = rewritten.modelUsed;
+          modelFallbackErrors = [...modelFallbackErrors, ...rewritten.attempts];
+        }
+      } catch (error: any) {
+        const attempts = Array.isArray(error?.attempts) ? error.attempts : [];
+        modelFallbackErrors = [...modelFallbackErrors, ...attempts];
+        console.error(
+          `[talken:model-fallback] stage=persona_rewrite exhausted error="${String(error?.message || error)}"`,
+        );
+      }
     }
 
-    if (!output || isOvergenericResponse(output)) {
+    if (!output || isOvergenericResponse(output, lastUserMessage, turnIntent)) {
       output = levelFallback(
         profile,
         lastUserMessage,
@@ -1001,8 +1780,25 @@ export async function POST(req: Request) {
         activePhase,
         helpMeMode,
         upgradeMode,
+        turnIntent,
+        weakWords,
+        recentMessages.filter((m) => m.role === 'assistant').map((m) => m.content),
       );
+      modelUsed = 'fallback-local';
     }
+
+    const attemptsSummary = modelFallbackErrors
+      .slice(-8)
+      .map((attempt) => {
+        const statusPart = attempt.status === null ? 'na' : String(attempt.status);
+        return `${attempt.stage}:${attempt.model}:${attempt.category}:${statusPart}`;
+      })
+      .join('|')
+      .slice(0, 480);
+
+    console.info(
+      `[talken:model-result] chosen=${modelUsed} attempts=${modelFallbackErrors.length} summary="${attemptsSummary || 'none'}"`,
+    );
 
     if (lastUserMessage) {
       await persistBrainTurn({
@@ -1025,6 +1821,9 @@ export async function POST(req: Request) {
       status: 200,
       headers: {
         'Content-Type': 'text/plain; charset=utf-8',
+        'X-Talken-Model': modelUsed,
+        'X-Talken-Model-Fallback-Errors': String(modelFallbackErrors.length),
+        'X-Talken-Model-Attempts': attemptsSummary || 'none',
       },
     });
   } catch (error: any) {
