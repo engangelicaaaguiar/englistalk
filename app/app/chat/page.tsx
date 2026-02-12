@@ -26,6 +26,7 @@ type ChatMessage = {
 };
 
 type ProfilePayload = {
+  userId: string;
   fullName: string;
   currentLevel: CEFRLevel;
   currentModule: string;
@@ -271,6 +272,7 @@ export default function AppChatPage() {
     const level = active?.current_level || 'A1';
 
     return {
+      userId: userIdRef.current,
       fullName: fullNameRef.current,
       currentLevel: level,
       currentModule: active?.current_module || 'Daily_Conversation',

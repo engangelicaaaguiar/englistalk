@@ -7,11 +7,13 @@ import {
   LearningModule,
   mapLegacyLevelToCefr,
 } from '../../../lib/cefr';
+import { getSupabaseAdmin } from '../../../lib/supabaseAdmin';
 
 export const maxDuration = 30;
 const PRIMARY_MODEL = 'llama-3.3-70b-versatile';
 
 type ProfilePayload = {
+  userId: string;
   fullName: string;
   currentLevel: CEFRLevel;
   currentModule: LearningModule;
@@ -21,6 +23,7 @@ type ProfilePayload = {
 };
 
 const defaultProfile: ProfilePayload = {
+  userId: '',
   fullName: '',
   currentLevel: 'A1',
   currentModule: 'Daily_Conversation',
@@ -28,6 +31,244 @@ const defaultProfile: ProfilePayload = {
   voice: 'en-US',
   ttsSpeed: 0.75,
 };
+
+type BrainPhase = 'pre_task' | 'task_cycle' | 'planning_refine' | 'report' | 'language_focus';
+
+type BrainSession = {
+  id: string;
+  phase: BrainPhase;
+  scenario: string;
+  task_goal: string;
+  turn_count: number;
+  stt_student_tokens: number;
+  stt_teacher_tokens: number;
+  language_gap_count: number;
+};
+
+function tokenCount(text: string | undefined) {
+  if (!text) return 0;
+  return text
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean).length;
+}
+
+function inferPhase(turnCount: number): BrainPhase {
+  if (turnCount <= 1) return 'pre_task';
+  if (turnCount <= 5) return 'task_cycle';
+  if (turnCount <= 7) return 'planning_refine';
+  if (turnCount <= 9) return 'report';
+  return 'language_focus';
+}
+
+function detectScenario(moduleName: LearningModule) {
+  if (moduleName === 'Travel_Logistics') return 'airport check-in and hotel reception';
+  if (moduleName === 'Work_Communication') return 'team meeting with status updates';
+  if (moduleName === 'Social_Small_Talk') return 'casual conversation with a new friend';
+  if (moduleName === 'Exam_Preparation') return 'public speaking task with argument and counterpoint';
+  return 'daily life conversation about routine, plans, and feelings';
+}
+
+function phaseMethodology(phase: BrainPhase) {
+  if (phase === 'pre_task') {
+    return [
+      'Phase: Pre-Task.',
+      'Role now: Instigator.',
+      'Set one authentic scenario and invite quick brainstorming.',
+      'Do NOT pre-teach grammar; ask the student to start speaking quickly.',
+      'Give only 3-5 useful words/chunks when needed, short and practical.',
+    ].join(' ');
+  }
+  if (phase === 'task_cycle') {
+    return [
+      'Phase: Task Cycle.',
+      'Role now: Invisible monitor inside the scenario.',
+      'Stay immersive (persona of the scenario), prioritize meaning over minor grammar errors.',
+      'Maximize student talking time: your reply should be shorter than the student message whenever possible.',
+      'If student gets stuck, give one lexical chunk and ask them to continue.',
+    ].join(' ');
+  }
+  if (phase === 'planning_refine') {
+    return [
+      'Phase: Planning and Refining.',
+      'Role now: Language consultant.',
+      'Use emergent language from previous turns only.',
+      'Help polish wording into natural chunks with concise guidance.',
+      'Ask short questions that help the student plan a stronger final delivery.',
+    ].join(' ');
+  }
+  if (phase === 'report') {
+    return [
+      'Phase: Report.',
+      'Role now: Chairperson.',
+      'Validate task success by meaning and clarity, not perfection.',
+      'Do not interrupt with corrections; let the learner deliver.',
+      'Keep prompts short so the learner speaks most of the time.',
+    ].join(' ');
+  }
+  return [
+    'Phase: Language Focus.',
+    'Role now: Analyst.',
+    'Show concise language gap from what learner said to a natural upgrade.',
+    'Focus on lexical chunks and collocations from real usage.',
+    'Finish with quick repeat practice prompt and one easy question.',
+  ].join(' ');
+}
+
+function extractChunks(text: string) {
+  return Array.from(
+    new Set(
+      text
+        .toLowerCase()
+        .replace(/[^a-z'\s]/g, ' ')
+        .split(/\s+/)
+        .filter((w) => w.length >= 3),
+    ),
+  ).slice(0, 6);
+}
+
+async function loadOrCreateBrainSession(profile: ProfilePayload): Promise<BrainSession | null> {
+  const supabase = getSupabaseAdmin();
+  if (!supabase || !profile.userId) return null;
+
+  const { data: existing } = await supabase
+    .from('talken_sessions')
+    .select('*')
+    .eq('user_id', profile.userId)
+    .eq('is_active', true)
+    .order('updated_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (existing) return existing as BrainSession;
+
+  const phase = 'pre_task';
+  const payload = {
+    user_id: profile.userId,
+    level_tag: profile.currentLevel,
+    module_tag: profile.currentModule,
+    phase,
+    scenario: detectScenario(profile.currentModule),
+    task_goal: 'keep fluent conversation with high student talking time in a real-life scenario',
+    is_active: true,
+  };
+
+  const { data: created } = await supabase.from('talken_sessions').insert(payload).select('*').single();
+  return (created as BrainSession) || null;
+}
+
+async function loadEmergentLanguageHints(session: BrainSession | null) {
+  const supabase = getSupabaseAdmin();
+  if (!supabase || !session) return '';
+
+  const { data } = await supabase
+    .from('talken_emergent_language')
+    .select('chunk')
+    .eq('session_id', session.id)
+    .order('updated_at', { ascending: false })
+    .limit(5);
+
+  const chunks = (data || []).map((row: any) => row.chunk).filter(Boolean);
+  if (chunks.length === 0) return 'No prior emergent chunks yet.';
+  return `Emergent chunks to recycle naturally: ${chunks.join(', ')}.`;
+}
+
+async function persistBrainTurn(params: {
+  profile: ProfilePayload;
+  session: BrainSession | null;
+  phase: BrainPhase;
+  userText: string;
+  assistantText: string;
+}) {
+  const { profile, session, phase, userText, assistantText } = params;
+  const supabase = getSupabaseAdmin();
+  if (!supabase || !session) return;
+
+  const studentTokens = tokenCount(userText);
+  const teacherTokens = tokenCount(assistantText);
+  const turnIndex = Number(session.turn_count || 0) + 1;
+
+  const introducedWordMatch = assistantText.match(/New word:\s*["']?([a-zA-Z'-]+)/i);
+  const introducedWord = introducedWordMatch?.[1]?.toLowerCase() || null;
+  const lexicalChunk = introducedWord ? `New word: ${introducedWord}` : null;
+
+  const { data: turn } = await supabase
+    .from('talken_turns')
+    .insert({
+      session_id: session.id,
+      user_id: profile.userId,
+      turn_index: turnIndex,
+      phase,
+      user_text: userText,
+      assistant_text: assistantText,
+      scenario_role: phase === 'task_cycle' ? 'in-scenario partner' : 'coach',
+      introduced_word: introducedWord,
+      lexical_chunk: lexicalChunk,
+      student_token_count: studentTokens,
+      teacher_token_count: teacherTokens,
+    })
+    .select('id')
+    .single();
+
+  const chunks = extractChunks(userText);
+  for (const chunk of chunks) {
+    const { data: existing } = await supabase
+      .from('talken_emergent_language')
+      .select('*')
+      .eq('session_id', session.id)
+      .eq('chunk', chunk)
+      .maybeSingle();
+
+    if (existing) {
+      await supabase
+        .from('talken_emergent_language')
+        .update({
+          occurrences: Number(existing.occurrences || 1) + 1,
+          status: Number(existing.occurrences || 1) >= 3 ? 'recycled' : 'new',
+          last_context: userText.slice(0, 240),
+        })
+        .eq('id', existing.id);
+    } else {
+      await supabase.from('talken_emergent_language').insert({
+        session_id: session.id,
+        user_id: profile.userId,
+        source_turn_id: turn?.id || null,
+        chunk,
+        status: 'new',
+        occurrences: 1,
+        last_context: userText.slice(0, 240),
+      });
+    }
+  }
+
+  if (phase === 'language_focus') {
+    await supabase.from('talken_language_gaps').insert({
+      session_id: session.id,
+      user_id: profile.userId,
+      source_turn_id: turn?.id || null,
+      phase,
+      gap_type: 'fluency',
+      student_attempt: userText.slice(0, 300),
+      target_upgrade: assistantText.slice(0, 300),
+      severity: 1,
+    });
+  }
+
+  const nextTurnCount = turnIndex;
+  const nextPhase = inferPhase(nextTurnCount);
+
+  await supabase
+    .from('talken_sessions')
+    .update({
+      turn_count: nextTurnCount,
+      phase: nextPhase,
+      stt_student_tokens: Number(session.stt_student_tokens || 0) + studentTokens,
+      stt_teacher_tokens: Number(session.stt_teacher_tokens || 0) + teacherTokens,
+      language_gap_count:
+        Number(session.language_gap_count || 0) + (phase === 'language_focus' ? 1 : 0),
+    })
+    .eq('id', session.id);
+}
 
 function normalizeMessages(messages: any[]) {
   return messages
@@ -69,6 +310,7 @@ function sanitizeProfile(raw: any): ProfilePayload {
   if (!raw || typeof raw !== 'object') return defaultProfile;
 
   return {
+    userId: typeof raw.userId === 'string' ? raw.userId.trim() : '',
     fullName: typeof raw.fullName === 'string' ? raw.fullName.trim().slice(0, 40) : '',
     currentLevel: mapLegacyLevelToCefr(raw.currentLevel),
     currentModule: sanitizeModule(raw.currentModule),
@@ -140,7 +382,14 @@ function personaInstruction(level: CEFRLevel) {
   ].join(' ');
 }
 
-function buildSystemPrompt(profile: ProfilePayload, isFirstTurn: boolean) {
+function buildSystemPrompt(
+  profile: ProfilePayload,
+  isFirstTurn: boolean,
+  phase: BrainPhase,
+  scenario: string,
+  emergentHints: string,
+  sttDirective: string,
+) {
   const blueprint = CEFR_BLUEPRINT[profile.currentLevel];
   const studentNameLine = profile.fullName
     ? `Student name: ${profile.fullName}. Use it naturally, no more than once every 3 turns.`
@@ -156,6 +405,10 @@ function buildSystemPrompt(profile: ProfilePayload, isFirstTurn: boolean) {
     `Correction style baseline: ${blueprint.correctionStyle}`,
     correctionDirective(profile.correctionMode),
     moduleDirective(profile.currentModule),
+    `Authentic scenario now: ${scenario}.`,
+    phaseMethodology(phase),
+    sttDirective,
+    emergentHints,
     personaInstruction(profile.currentLevel),
     `Speech context for rhythm: ${profile.voice} at around ${profile.ttsSpeed.toFixed(2)}x speed.`,
     'Always respond in English.',
@@ -345,13 +598,30 @@ export async function POST(req: Request) {
       .find((m) => m.role === 'user')?.content;
     const assistantTurns = recentMessages.filter((m) => m.role === 'assistant').length;
     const isFirstTurn = assistantTurns === 0;
+    const brainSession = await loadOrCreateBrainSession(profile);
+    const phase = brainSession?.phase || inferPhase(assistantTurns);
+    const scenario = brainSession?.scenario || detectScenario(profile.currentModule);
+    const emergentHints = await loadEmergentLanguageHints(brainSession);
+    const sttDirective =
+      tokenCount(lastUserMessage) >= 6
+        ? 'Student message was long enough: keep your response shorter than the student response.'
+        : 'Student message was short: keep your response concise and ask one easy continuation question.';
 
     const groq = createGroq({ apiKey });
 
     let output = '';
+    const systemPrompt = buildSystemPrompt(
+      profile,
+      isFirstTurn,
+      phase,
+      scenario,
+      emergentHints,
+      sttDirective,
+    );
+
     const firstTry = await generateText({
       model: groq(PRIMARY_MODEL) as any,
-      system: buildSystemPrompt(profile, isFirstTurn),
+      system: systemPrompt,
       messages: convertToCoreMessages(recentMessages as any),
       maxTokens: 300,
       temperature: 0.65,
@@ -365,7 +635,7 @@ export async function POST(req: Request) {
         .join('\n');
 
       const retryPrompt = [
-        buildSystemPrompt(profile, isFirstTurn),
+        systemPrompt,
         '',
         'Conversation transcript:',
         transcript,
@@ -390,6 +660,16 @@ export async function POST(req: Request) {
 
     if (!output) {
       output = levelFallback(profile, lastUserMessage, isFirstTurn);
+    }
+
+    if (lastUserMessage) {
+      await persistBrainTurn({
+        profile,
+        session: brainSession,
+        phase,
+        userText: lastUserMessage,
+        assistantText: output,
+      });
     }
 
     return new Response(output, {
