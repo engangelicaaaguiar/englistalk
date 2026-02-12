@@ -18,6 +18,10 @@
     "jsx": "preserve",
     "incremental": true,
     "strict": false,
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./*"]
+    },
     "plugins": [
       {
         "name": "next"
