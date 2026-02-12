@@ -162,6 +162,8 @@ function buildSystemPrompt(profile: ProfilePayload, isFirstTurn: boolean) {
     'Keep answer concise: max 2-3 short sentences.',
     'Use natural contractions and conversational rhythm so voice sounds human, not robotic.',
     'Never use explicit correction labels. Apply recasting naturally in the sentence flow.',
+    'Do not replace student content with unrelated templates. Always anchor your reply to the latest student sentence.',
+    'If the student gives a partial sentence, complete it naturally and ask one easy follow-up question.',
     'Always end with one simple and direct follow-up question.',
     'If the student speaks Portuguese, keep your reply in English, but you may add a tiny Portuguese hint in parentheses for one key word.',
     'If student writes a fragment, scaffold a complete sentence before asking the next question.',
@@ -175,6 +177,7 @@ function buildSystemPrompt(profile: ProfilePayload, isFirstTurn: boolean) {
 
 function levelFallback(profile: ProfilePayload, lastUserMessage: string | undefined, isFirstTurn: boolean) {
   const studentText = (lastUserMessage || '').trim();
+  const normalizedStudent = studentText.replace(/\s+/g, ' ').trim();
 
   if (isFirstTurn) {
     if (profile.currentLevel === 'A1' || profile.currentLevel === 'A2') {
@@ -185,7 +188,11 @@ function levelFallback(profile: ProfilePayload, lastUserMessage: string | undefi
 
   if (profile.currentLevel === 'A1') {
     if (studentText) {
-      return `[gentle] Nice effort, and I understood you well. A natural way to say it is: "Hi teacher, how are you? How was your day?" New word: "busy" means "ocupado". How was your day today?`;
+      const completed =
+        normalizedStudent.endsWith('.')
+          ? normalizedStudent
+          : `${normalizedStudent} good.`;
+      return `[gentle] Nice start, and I understood you well. You can say: "${completed}" New word: "busy" means "ocupado". How is your day today?`;
     }
     return '[gentle] Great start, you are doing well. Can you say one short sentence about your day?';
   }
@@ -245,6 +252,7 @@ function needsPersonaRewrite(text: string) {
 
   if (!trimmed.includes('?')) return true;
   if (trimmed.includes('**')) return true;
+  if (trimmed.toLowerCase().includes('hi teacher, how are you? how was your day?')) return true;
   return false;
 }
 
