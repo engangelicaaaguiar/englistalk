@@ -27,7 +27,7 @@ export async function POST(req: Request) {
     });
 
     console.log("✅ Stream iniciado com sucesso");
-    return result.toDataStreamResponse();
+    return result.toAIStreamResponse();
 
   } catch (error: any) {
     console.error("💀 ERRO NA API:", error.message || error);
