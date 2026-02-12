@@ -11,6 +11,9 @@ import { getSupabaseAdmin } from '../../../lib/supabaseAdmin';
 
 export const maxDuration = 30;
 const PRIMARY_MODEL = 'llama-3.3-70b-versatile';
+const PRIMARY_TEMPERATURE = 0.7;
+const PRIMARY_MAX_TOKENS = 150;
+const PRIMARY_PRESENCE_PENALTY = 0.6;
 
 type ProfilePayload = {
   userId: string;
@@ -86,6 +89,14 @@ function phaseRole(phase: BrainPhase) {
   return 'Analyst & Detective';
 }
 
+function isHelpMeIntent(text: string) {
+  return /\b(how do i say|como digo|how can i say|what is .* in english)\b/i.test(text);
+}
+
+function isUpgradeIntent(text: string) {
+  return /\b(more persuasive|refined|natural way|upgrade|c2|more natural)\b/i.test(text);
+}
+
 function detectStartIntent(text: string) {
   return /\b(ok(ay)?|let'?s start|i'?m ready|ready|vamos|bora|pode comecar)\b/i.test(text);
 }
@@ -113,6 +124,19 @@ function estimatePtRatio(text: string) {
 
   const ptCount = tokens.filter((t) => ptHints.has(t)).length;
   return ptCount / tokens.length;
+}
+
+function detectAffectiveState(metrics: RuntimeMetrics) {
+  const highAnxiety = metrics.ptRatio >= 0.35 || metrics.shortMessageStreak >= 2;
+  return {
+    state: highAnxiety ? 'High Anxiety' : 'Stable',
+    highAnxiety,
+    signals: {
+      pt_ratio: Number(metrics.ptRatio.toFixed(2)),
+      short_message_streak: metrics.shortMessageStreak,
+      teacher_talk_pct: metrics.teacherTalkPct,
+    },
+  };
 }
 
 function computeRuntimeMetrics(recentMessages: Array<{ role: string; content: string }>, lastUserText: string) {
@@ -310,6 +334,59 @@ async function loadEmergentLanguageHints(session: BrainSession | null) {
   return `Emergent chunks to recycle naturally: ${chunks.join(', ')}.`;
 }
 
+async function loadWeakWords(userId: string, level: CEFRLevel) {
+  const supabase = getSupabaseAdmin();
+  if (!supabase || !userId) return [] as string[];
+
+  const { data } = await supabase
+    .from('vocabulary_mastery')
+    .select('word')
+    .eq('user_id', userId)
+    .eq('level_tag', level)
+    .eq('status', 'weak')
+    .order('updated_at', { ascending: false })
+    .limit(5);
+
+  return (data || []).map((row: any) => String(row.word || '').trim()).filter(Boolean);
+}
+
+async function loadHiddenLanguageLog(session: BrainSession | null) {
+  const supabase = getSupabaseAdmin();
+  if (!supabase || !session) return [] as Array<{ student_error: string; target_chunk: string }>;
+
+  const { data } = await supabase
+    .from('talken_hidden_language_log')
+    .select('student_attempt,target_upgrade')
+    .eq('session_id', session.id)
+    .order('created_at', { ascending: false })
+    .limit(8);
+
+  return (data || [])
+    .map((row: any) => ({
+      student_error: String(row.student_attempt || '').slice(0, 140),
+      target_chunk: String(row.target_upgrade || '').slice(0, 140),
+    }))
+    .filter((row: any) => row.student_error && row.target_chunk);
+}
+
+function buildSilentMemoryJson(params: {
+  phase: BrainPhase;
+  affectiveState: ReturnType<typeof detectAffectiveState>;
+  weakWords: string[];
+  emergentLog: Array<{ student_error: string; target_chunk: string }>;
+}) {
+  const payload = {
+    phase: params.phase,
+    affective_state: params.affectiveState,
+    spaced_repetition: {
+      weak_words: params.weakWords,
+      instruction: 'Recycle these weak words naturally in new contexts when relevant.',
+    },
+    emergent_language_log: params.emergentLog,
+  };
+  return JSON.stringify(payload);
+}
+
 async function persistBrainTurn(params: {
   profile: ProfilePayload;
   session: BrainSession | null;
@@ -404,6 +481,35 @@ async function persistBrainTurn(params: {
         Number(session.language_gap_count || 0) + (phase === 'language_focus' ? 1 : 0),
     })
     .eq('id', session.id);
+}
+
+async function persistHiddenLanguageLog(params: {
+  profile: ProfilePayload;
+  session: BrainSession | null;
+  phase: BrainPhase;
+  userText: string;
+  assistantText: string;
+}) {
+  const { profile, session, phase, userText, assistantText } = params;
+  const supabase = getSupabaseAdmin();
+  if (!supabase || !session) return;
+
+  const quoted = assistantText.match(/"([^"]{4,140})"/g) || [];
+  const upgraded = quoted
+    .map((q) => q.replace(/^"|"$/g, ''))
+    .find((q) => q.toLowerCase() !== userText.toLowerCase());
+
+  if (!upgraded) return;
+
+  await supabase.from('talken_hidden_language_log').insert({
+    session_id: session.id,
+    user_id: profile.userId,
+    phase,
+    gap_type: isUpgradeIntent(userText) ? 'lexical' : 'fluency',
+    student_attempt: userText.slice(0, 300),
+    target_upgrade: upgraded.slice(0, 300),
+    notes: 'offline correction log for language focus',
+  });
 }
 
 function normalizeMessages(messages: any[]) {
@@ -526,6 +632,8 @@ function buildSystemPrompt(
   emergentHints: string,
   sttDirective: string,
   transition: TransitionEval,
+  silentMemoryJson: string,
+  chunkMinerDirective: string,
 ) {
   const blueprint = CEFR_BLUEPRINT[profile.currentLevel];
   const studentNameLine = profile.fullName
@@ -548,6 +656,8 @@ function buildSystemPrompt(
     phaseMethodology(phase),
     sttDirective,
     emergentHints,
+    `Silent memory JSON (do not expose explicitly): ${silentMemoryJson}`,
+    chunkMinerDirective,
     transition.shortenResponse
       ? 'Internal control: STT exceeded 30% for teacher. Apply shorten_response now.'
       : 'Internal control: STT within target.',
@@ -569,6 +679,8 @@ function buildSystemPrompt(
     'If the student speaks Portuguese, keep your reply in English, but you may add a tiny Portuguese hint in parentheses for one key word.',
     'If student writes a fragment, scaffold a complete sentence before asking the next question.',
     'Introduce one useful new word naturally in context when possible.',
+    'In task_cycle, stay in character and prioritize meaning over minor grammar errors.',
+    'In language_focus, provide concise Gap Analysis: what learner said vs native-like upgrade.',
     'Never say you did not understand if user text exists. Coach from available text.',
     isFirstTurn
       ? 'This is the first teacher turn: greet warmly, answer the student greeting naturally, and begin a fluid conversation.'
@@ -576,15 +688,47 @@ function buildSystemPrompt(
   ].join('\n');
 }
 
-function levelFallback(profile: ProfilePayload, lastUserMessage: string | undefined, isFirstTurn: boolean) {
+function levelFallback(
+  profile: ProfilePayload,
+  lastUserMessage: string | undefined,
+  isFirstTurn: boolean,
+  phase: BrainPhase,
+  helpMeMode: boolean,
+  upgradeMode: boolean,
+) {
   const studentText = (lastUserMessage || '').trim();
   const normalizedStudent = studentText.replace(/\s+/g, ' ').trim();
+  const lower = normalizedStudent.toLowerCase();
+
+  if (/language gap/.test(lower)) {
+    return '[gentle] Great request. Language Gap: you said "I want more money," while a native professional version is "Based on my impact, I would like to discuss a compensation adjustment." Can you repeat that upgraded sentence once?';
+  }
+
+  if (/feedback/.test(lower) || /i'?m done with the task/.test(lower)) {
+    return '[cheerful] Excellent work, you completed the task. Quick feedback: your message is clear, and the main upgrade is using "I would like to discuss..." instead of "I want...". Can you deliver your final polished version in one sentence?';
+  }
+
+  if (upgradeMode && lower.includes('want more money')) {
+    return '[gentle] Strong intent, and here is a more persuasive version: "Based on my recent results, I would like to discuss a compensation adjustment." New chunk: "compensation adjustment." Would you like a softer or firmer tone?';
+  }
+
+  if (helpMeMode) {
+    return '[cheerful] Great question. You can say: "I would like to request a refund." New chunk: "request a refund." Can you say that to me as if I were the HR manager?';
+  }
+
+  if (phase === 'language_focus' && /feedback|language gap/.test(lower)) {
+    return '[gentle] Great timing for feedback. Language Gap: you said "I want more money," and a native professional version is "I would like to discuss a compensation adjustment based on my performance." Can you repeat the upgraded sentence once?';
+  }
+
+  if (phase === 'report' && /done|final|feedback/.test(lower)) {
+    return '[cheerful] Excellent, you completed the task clearly and kept your message professional. Your main upgrade is using "I would like to discuss..." instead of "I want...". Could you deliver your final version in one smooth sentence?';
+  }
 
   if (isFirstTurn) {
     if (profile.currentLevel === 'A1' || profile.currentLevel === 'A2') {
       return '[cheerful] Hi! It is great to meet you, and I am happy to practice with you today. New word: "great" means "otimo". How are you feeling today?';
     }
-    return '[cheerful] Hi! I am glad to meet you, and I am ready for a great conversation. New word: "insightful" means full of good ideas. What topic would you like to start with?';
+    return '[cheerful] Great, let us start the job interview roleplay. New word: "strengths" means your best professional qualities. What are your top two strengths for this role?';
   }
 
   if (profile.currentLevel === 'A1') {
@@ -621,7 +765,10 @@ function levelFallback(profile: ProfilePayload, lastUserMessage: string | undefi
 
   if (profile.currentLevel === 'C1' || profile.currentLevel === 'C2') {
     if (studentText) {
-      return `[gentle] I really like where you're going with this idea, and a natural way to say it is: "${studentText}". A small tone shift can make it sound even more persuasive. What tone do you want to project: confident, diplomatic, or assertive?`;
+      if (phase === 'task_cycle') {
+        return '[gentle] Good flow, keep going in character. New chunk: "I have led cross-functional projects" to sound more executive. How would you answer: "Tell me about a challenge you solved at work?"';
+      }
+      return '[gentle] Good point, and your message is clear. A polished version could use stronger framing and evidence. What one concrete result can you add to make it persuasive?';
     }
     return '[gentle] You are ready for a nuanced answer, and that is a great sign. Share one opinion and one counterpoint in a calm, persuasive way. What topic do you want to tackle first?';
   }
@@ -655,6 +802,14 @@ function needsPersonaRewrite(text: string) {
   if (trimmed.includes('**')) return true;
   if (trimmed.toLowerCase().includes('hi teacher, how are you? how was your day?')) return true;
   return false;
+}
+
+function isOvergenericResponse(text: string) {
+  const t = text.toLowerCase();
+  return (
+    t.includes("i really like where you're going with this idea") &&
+    t.includes('what tone do you want to project')
+  );
 }
 
 async function rewriteWithPersonaGuard(
@@ -760,6 +915,22 @@ export async function POST(req: Request) {
       metrics,
     });
     const activePhase = transition.nextPhase;
+    const affectiveState = detectAffectiveState(metrics);
+    const weakWords = await loadWeakWords(profile.userId, profile.currentLevel);
+    const hiddenLanguageLog = await loadHiddenLanguageLog(brainSession);
+    const silentMemoryJson = buildSilentMemoryJson({
+      phase: activePhase,
+      affectiveState,
+      weakWords,
+      emergentLog: hiddenLanguageLog,
+    });
+    const helpMeMode = isHelpMeIntent(safeLastUser);
+    const upgradeMode = isUpgradeIntent(safeLastUser) || activePhase === 'language_focus';
+    const chunkMinerDirective = helpMeMode
+      ? 'Chunk Miner Mode: HELP_ME. Give one minimal lexical chunk that unblocks communication, then immediately continue roleplay in character.'
+      : upgradeMode
+        ? 'Chunk Miner Mode: UPGRADE. Show concise lexical upgrade from simple phrasing to a more natural/professional C1/C2 chunk.'
+        : 'Chunk Miner Mode: PASSIVE. Recycle useful chunks only when relevant.';
     const sttDirective = transition.shortenResponse
       ? 'Student Talking Time control: your response must be shorter than the student response and use at most 2 short sentences before the question.'
       : tokenCount(lastUserMessage) >= 6
@@ -777,14 +948,17 @@ export async function POST(req: Request) {
       emergentHints,
       sttDirective,
       transition,
+      silentMemoryJson,
+      chunkMinerDirective,
     );
 
     const firstTry = await generateText({
       model: groq(PRIMARY_MODEL) as any,
       system: systemPrompt,
       messages: convertToCoreMessages(recentMessages as any),
-      maxTokens: 300,
-      temperature: 0.65,
+      maxTokens: PRIMARY_MAX_TOKENS,
+      temperature: PRIMARY_TEMPERATURE,
+      presencePenalty: PRIMARY_PRESENCE_PENALTY,
     });
 
     output = (firstTry.text || '').trim();
@@ -806,8 +980,9 @@ export async function POST(req: Request) {
       const retry = await generateText({
         model: groq(PRIMARY_MODEL) as any,
         prompt: retryPrompt,
-        maxTokens: 300,
-        temperature: 0.65,
+        maxTokens: PRIMARY_MAX_TOKENS,
+        temperature: PRIMARY_TEMPERATURE,
+        presencePenalty: PRIMARY_PRESENCE_PENALTY,
       });
 
       output = (retry.text || '').trim();
@@ -818,12 +993,26 @@ export async function POST(req: Request) {
       if (rewritten) output = rewritten;
     }
 
-    if (!output) {
-      output = levelFallback(profile, lastUserMessage, isFirstTurn);
+    if (!output || isOvergenericResponse(output)) {
+      output = levelFallback(
+        profile,
+        lastUserMessage,
+        isFirstTurn,
+        activePhase,
+        helpMeMode,
+        upgradeMode,
+      );
     }
 
     if (lastUserMessage) {
       await persistBrainTurn({
+        profile,
+        session: brainSession,
+        phase: activePhase,
+        userText: lastUserMessage,
+        assistantText: output,
+      });
+      await persistHiddenLanguageLog({
         profile,
         session: brainSession,
         phase: activePhase,
