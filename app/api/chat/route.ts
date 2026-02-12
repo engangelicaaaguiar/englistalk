@@ -1627,7 +1627,7 @@ export async function POST(req: Request) {
       );
     }
 
-    const recentMessages = normalizedMessages.slice(-14);
+    const recentMessages = normalizedMessages;
     const lastUserMessage = [...recentMessages]
       .reverse()
       .find((m) => m.role === 'user')?.content;

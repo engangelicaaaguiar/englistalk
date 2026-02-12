@@ -379,8 +379,7 @@ export default function AppChatPage() {
     setMessages(history);
 
     try {
-      const compactHistory = history.slice(-10);
-      let assistantText = await requestAssistant(compactHistory);
+      let assistantText = await requestAssistant(history);
       if (!assistantText) {
         assistantText = await requestAssistant([userMessage]);
       }
@@ -455,13 +454,14 @@ export default function AppChatPage() {
         else interimText += chunk;
       }
 
-      interimTranscriptRef.current = interimText.trim();
-      if (interimText.trim()) setSubtitleUser(interimText.trim());
-
-      if (finalText.trim()) {
-        finalTranscriptRef.current = finalText.trim();
-        setSubtitleUser(finalText.trim());
+      const finalizedChunk = finalText.trim();
+      if (finalizedChunk) {
+        finalTranscriptRef.current = `${finalTranscriptRef.current} ${finalizedChunk}`.trim();
       }
+
+      interimTranscriptRef.current = interimText.trim();
+      const liveTranscript = `${finalTranscriptRef.current} ${interimTranscriptRef.current}`.trim();
+      if (liveTranscript) setSubtitleUser(liveTranscript);
     };
 
     recognition.onend = () => {
@@ -475,7 +475,7 @@ export default function AppChatPage() {
       silenceDecisionTimeoutRef.current = setTimeout(() => {
         silenceDecisionTimeoutRef.current = null;
 
-        const transcript = (finalTranscriptRef.current || interimTranscriptRef.current).trim();
+        const transcript = `${finalTranscriptRef.current} ${interimTranscriptRef.current}`.trim();
         if (transcript && !pendingSendRef.current) {
           finalTranscriptRef.current = '';
           interimTranscriptRef.current = '';
