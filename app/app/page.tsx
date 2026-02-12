@@ -1,5 +1,5 @@
 import { redirect } from 'next/navigation';
 
-export default function LegacyChatRoute() {
+export default function AppRootPage() {
   redirect('/app/chat');
 }
