@@ -16,7 +16,7 @@ export async function POST(req: Request) {
 
     const result = await streamText({
       // Modelo oficial do Groq (Llama 3 8B é o mais rápido/estável)
-      model: groq('llama3-8b-8192'),
+      model: groq('llama3-8b-8192') as any,
       
       system: `You are "Talken", a friendly English tutor.
                1. Keep responses short (max 2 sentences).
