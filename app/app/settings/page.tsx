@@ -1,9 +1,11 @@
 'use client';
 
 import { FormEvent, useEffect, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import { getSupabaseClient } from '../../../lib/supabaseClient';
 
 export default function SettingsPage() {
+  const router = useRouter();
   const [fullName, setFullName] = useState('');
   const [level, setLevel] = useState('beginner');
   const [goal, setGoal] = useState('daily-conversation');
@@ -11,10 +13,14 @@ export default function SettingsPage() {
   const [status, setStatus] = useState('');
 
   useEffect(() => {
+    getSupabaseClient().auth.getSession().then(({ data }) => {
+      if (!data.session) router.replace('/auth/login');
+    });
+
     getSupabaseClient().auth.getUser().then(({ data }) => {
       setFullName((data.user?.user_metadata?.full_name as string) || '');
     });
-  }, []);
+  }, [router]);
 
   const save = async (e: FormEvent) => {
     e.preventDefault();

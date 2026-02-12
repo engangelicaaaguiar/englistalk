@@ -17,16 +17,24 @@ export default function LoginPage() {
     setError('');
     setLoading(true);
 
-    const { error: loginError } = await getSupabaseClient().auth.signInWithPassword({ email, password });
+    try {
+      const { error: loginError } = await getSupabaseClient().auth.signInWithPassword({
+        email,
+        password,
+      });
 
-    setLoading(false);
-    if (loginError) {
-      setError(loginError.message);
-      return;
+      if (loginError) {
+        setError(loginError.message);
+        return;
+      }
+
+      router.replace('/app/chat');
+      router.refresh();
+    } catch (err: any) {
+      setError(err?.message || 'Falha ao entrar. Tente novamente.');
+    } finally {
+      setLoading(false);
     }
-
-    router.push('/app/chat');
-    router.refresh();
   };
 
   const google = async () => {

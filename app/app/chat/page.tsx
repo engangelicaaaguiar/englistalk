@@ -2,6 +2,7 @@
 
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
+import { useEffect } from 'react';
 import { useChat } from 'ai/react';
 import ChatInput from '../../../components/ChatInput';
 import Message from '../../../components/Message';
@@ -13,6 +14,16 @@ export default function AppChatPage() {
     api: '/api/chat',
     streamMode: 'text',
   });
+
+  useEffect(() => {
+    const checkSession = async () => {
+      const { data } = await getSupabaseClient().auth.getSession();
+      if (!data.session) {
+        router.replace('/auth/login');
+      }
+    };
+    void checkSession();
+  }, [router]);
 
   const logout = async () => {
     await getSupabaseClient().auth.signOut();
