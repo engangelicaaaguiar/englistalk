@@ -1,7 +1,7 @@
 'use client';
 
-import { useChat } from 'ai/react';
 import { useEffect, useState, useRef } from 'react';
+import { useChatJSON } from '@/lib/useChatJSON';
 import { Mic, MicOff, Zap, X, ShieldCheck, Sparkles, ChevronRight, Play, BrainCircuit, Headphones, Globe, Mail, Lock, ArrowLeft, CheckCircle2 } from 'lucide-react';
 
 export default function TalkenApp() {
@@ -10,17 +10,10 @@ export default function TalkenApp() {
   const [status, setStatus] = useState("Pronto");
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [isLoadingLogin, setIsLoadingLogin] = useState(false); // Simula loading do login
+  const [isLoadingLogin, setIsLoadingLogin] = useState(false);
   
-  // Hook AI
-  const { messages, append, isLoading } = useChat({
-    api: '/api/chat',
-    onError: () => setStatus("Erro de Conexão"),
-    onFinish: () => {
-      setStatus("Sua vez");
-      restartListening();
-    }
-  });
+  // Hook AI customizado (JSON ao invés de SSE)
+  const { messages, append, isLoading } = useChatJSON('/api/chat');
 
   const recognitionRef = useRef<any>(null);
   const silenceTimerRef = useRef<any>(null);
@@ -64,6 +57,13 @@ export default function TalkenApp() {
 
   const restartListening = () => { try { recognitionRef.current?.start(); } catch(e) {} };
   const toggleListening = () => isListening ? recognitionRef.current?.stop() : restartListening();
+
+  // Restart listening quando isLoading termina
+  useEffect(() => {
+    if (!isLoading && messages.length > 0 && messages[messages.length - 1]?.role === 'user') {
+      setStatus("Sua vez");
+    }
+  }, [isLoading, messages]);
 
   // TTS
   useEffect(() => {
