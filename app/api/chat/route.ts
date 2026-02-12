@@ -1,24 +1,31 @@
 import { createGroq } from '@ai-sdk/groq';
 import { convertToCoreMessages, generateText } from 'ai';
+import {
+  CEFR_BLUEPRINT,
+  CEFRLevel,
+  CorrectionMode,
+  LearningModule,
+  mapLegacyLevelToCefr,
+} from '../../../lib/cefr';
 
 export const maxDuration = 30;
 
-type Level = 'beginner' | 'intermediate' | 'advanced';
-type Goal = 'daily-conversation' | 'travel' | 'work';
-type Voice = 'en-US' | 'en-GB';
-
-type StudentProfile = {
+type ProfilePayload = {
   fullName: string;
-  level: Level;
-  goal: Goal;
-  voice: Voice;
+  currentLevel: CEFRLevel;
+  currentModule: LearningModule;
+  correctionMode: CorrectionMode;
+  voice: 'en-US' | 'en-GB';
+  ttsSpeed: number;
 };
 
-const defaultProfile: StudentProfile = {
+const defaultProfile: ProfilePayload = {
   fullName: '',
-  level: 'beginner',
-  goal: 'daily-conversation',
+  currentLevel: 'A1',
+  currentModule: 'Daily_Conversation',
+  correctionMode: 'friendly',
   voice: 'en-US',
+  ttsSpeed: 0.75,
 };
 
 function normalizeMessages(messages: any[]) {
@@ -44,112 +51,129 @@ function normalizeMessages(messages: any[]) {
     .map((m: any) => ({ role: m.role, content: m.content.trim() }));
 }
 
-function sanitizeProfile(profile: any): StudentProfile {
-  const level: Level =
-    profile?.level === 'beginner' || profile?.level === 'intermediate' || profile?.level === 'advanced'
-      ? profile.level
-      : defaultProfile.level;
-
-  const goal: Goal =
-    profile?.goal === 'daily-conversation' || profile?.goal === 'travel' || profile?.goal === 'work'
-      ? profile.goal
-      : defaultProfile.goal;
-
-  const voice: Voice = profile?.voice === 'en-US' || profile?.voice === 'en-GB' ? profile.voice : defaultProfile.voice;
-
-  const fullName = typeof profile?.fullName === 'string' ? profile.fullName.trim().slice(0, 40) : '';
-
-  return { fullName, level, goal, voice };
+function sanitizeModule(value: any): LearningModule {
+  if (
+    value === 'Daily_Conversation' ||
+    value === 'Travel_Logistics' ||
+    value === 'Work_Communication' ||
+    value === 'Social_Small_Talk' ||
+    value === 'Exam_Preparation'
+  ) {
+    return value;
+  }
+  return 'Daily_Conversation';
 }
 
-function levelPersona(level: Level) {
-  if (level === 'beginner') {
-    return {
-      coachName: 'Luna',
-      style: [
-        'Use CEFR A1-A2 vocabulary only.',
-        'Use short and very clear sentences.',
-        'If student gives a fragment, help complete a natural full sentence.',
-        'Give one correction and one encouraging question.',
-        'Max 2 short sentences.',
-      ],
-    };
-  }
-
-  if (level === 'intermediate') {
-    return {
-      coachName: 'Maya',
-      style: [
-        'Use CEFR B1-B2 vocabulary with natural spoken English.',
-        'Give one concise correction and one better alternative expression.',
-        'Keep conversation flowing and practical.',
-        'Max 3 sentences.',
-      ],
-    };
-  }
+function sanitizeProfile(raw: any): ProfilePayload {
+  if (!raw || typeof raw !== 'object') return defaultProfile;
 
   return {
-    coachName: 'Orion',
-    style: [
-      'Use CEFR C1-C2 language and nuanced feedback.',
-      'Refine precision, tone, and fluency with concise coaching.',
-      'Challenge the student with a thoughtful follow-up question.',
-      'Max 3 sentences.',
-    ],
+    fullName: typeof raw.fullName === 'string' ? raw.fullName.trim().slice(0, 40) : '',
+    currentLevel: mapLegacyLevelToCefr(raw.currentLevel),
+    currentModule: sanitizeModule(raw.currentModule),
+    correctionMode: raw.correctionMode === 'strict' ? 'strict' : 'friendly',
+    voice: raw.voice === 'en-GB' ? 'en-GB' : 'en-US',
+    ttsSpeed: typeof raw.ttsSpeed === 'number' ? raw.ttsSpeed : defaultProfile.ttsSpeed,
   };
 }
 
-function goalDirective(goal: Goal) {
-  if (goal === 'travel') {
-    return 'Prioritize travel scenarios: airport, hotel, directions, restaurants, emergencies.';
+function moduleDirective(moduleName: LearningModule) {
+  if (moduleName === 'Travel_Logistics') {
+    return 'Context focus: airports, hotels, directions, transport, food ordering, emergencies.';
   }
-  if (goal === 'work') {
-    return 'Prioritize work scenarios: meetings, updates, negotiation, presentations, email tone.';
+  if (moduleName === 'Work_Communication') {
+    return 'Context focus: meetings, status updates, negotiations, presentations, professional tone.';
   }
-  return 'Prioritize daily conversation: routine, hobbies, feelings, friends, daily decisions.';
+  if (moduleName === 'Social_Small_Talk') {
+    return 'Context focus: greetings, hobbies, friends, opinions, casual interaction.';
+  }
+  if (moduleName === 'Exam_Preparation') {
+    return 'Context focus: exam-like prompts, coherent arguments, precision under pressure.';
+  }
+  return 'Context focus: daily life, routines, practical conversation.';
 }
 
-function buildSystemPrompt(profile: StudentProfile) {
-  const persona = levelPersona(profile.level);
-  const nameLine = profile.fullName
-    ? `Student name is ${profile.fullName}. Use the name naturally at most once every 3 turns.`
-    : 'Student name is unknown. Do not mention a name.';
+function correctionDirective(mode: CorrectionMode) {
+  if (mode === 'strict') {
+    return [
+      'Be rigorous in corrections.',
+      'Correct every relevant grammar issue that blocks natural fluency.',
+      'Prefer exact and native-like alternatives.',
+    ].join(' ');
+  }
 
   return [
-    `You are Talken Coach ${persona.coachName}, an English speaking tutor with a warm personality.`,
-    nameLine,
-    `Student level: ${profile.level}.`,
-    `Preferred accent context: ${profile.voice}.`,
-    goalDirective(profile.goal),
-    ...persona.style,
+    'Be friendly and confidence-first.',
+    'Correct only one key issue per turn unless understanding breaks.',
+    'Prioritize flow and safety before perfection.',
+  ].join(' ');
+}
+
+function buildSystemPrompt(profile: ProfilePayload) {
+  const blueprint = CEFR_BLUEPRINT[profile.currentLevel];
+  const studentNameLine = profile.fullName
+    ? `Student name: ${profile.fullName}. Use it naturally, no more than once every 3 turns.`
+    : 'Student name unknown. Do not force name usage.';
+
+  return [
+    'You are Talken, a safe and encouraging English fluency teacher.',
+    studentNameLine,
+    `Current CEFR level: ${profile.currentLevel}.`,
+    `JTBD: ${blueprint.jtbd}`,
+    `Vocabulary rule: ${blueprint.vocabularyRule}`,
+    `Grammar focus: ${blueprint.grammarFocus.join(', ')}.`,
+    `Correction style baseline: ${blueprint.correctionStyle}`,
+    correctionDirective(profile.correctionMode),
+    moduleDirective(profile.currentModule),
+    `Speech context for rhythm: ${profile.voice} at around ${profile.ttsSpeed.toFixed(2)}x speed.`,
     'Always respond in English.',
-    'If there is a grammar issue, show the corrected part using **bold** markdown.',
-    'Never say you did not catch the message if user text exists; coach from what was said.',
-    'Always end with one simple, direct question to continue the conversation.',
+    'Keep answer concise: max 3 short sentences.',
+    'If there is a grammar issue, show corrected fragment in **bold** markdown.',
+    'Always end with one simple and direct follow-up question.',
+    'If student writes a fragment, scaffold a complete sentence before asking the next question.',
+    'Never say you did not understand if user text exists. Coach from available text.',
   ].join('\n');
 }
 
-function fallbackReply(profile: StudentProfile, lastUserMessage: string | undefined) {
-  const safeUser = (lastUserMessage || '').trim();
+function levelFallback(profile: ProfilePayload, lastUserMessage: string | undefined) {
+  const studentText = (lastUserMessage || '').trim();
 
-  if (profile.level === 'beginner') {
-    if (safeUser) {
-      return `Great start. You can say: **${safeUser}**. Can you add 3 more words to complete your idea?`;
+  if (profile.currentLevel === 'A1') {
+    if (studentText) {
+      return `Great start. A clear version is: **${studentText}**. Can you add 3 more words to finish your idea?`;
     }
     return 'Great start. Can you say one short sentence about your day?';
   }
 
-  if (profile.level === 'intermediate') {
-    if (safeUser) {
-      return `Nice point. A natural version is: **${safeUser}**. Can you expand it with one specific detail?`;
+  if (profile.currentLevel === 'A2') {
+    if (studentText) {
+      return `Nice sentence. A better version is: **${studentText}**. Can you connect another idea using because?`;
     }
-    return 'Good. Can you describe one real situation from today in English?';
+    return 'Good. Can you tell me one thing you did yesterday?';
   }
 
-  if (safeUser) {
-    return `Strong opening. A polished version is: **${safeUser}**. Which nuance would you add to make it more precise?`;
+  if (profile.currentLevel === 'B1') {
+    if (studentText) {
+      return `Good point. A stronger phrasing is: **${studentText}**. Can you add one detail with a richer adjective?`;
+    }
+    return 'Nice. Can you explain one plan you have for this week?';
   }
-  return 'Let us go deeper. Can you express one opinion and support it briefly?';
+
+  if (profile.currentLevel === 'B2') {
+    if (studentText) {
+      return `Clear idea. A more natural version is: **${studentText}**. How would you justify this in a work meeting?`;
+    }
+    return 'Can you defend your opinion with one argument and one example?';
+  }
+
+  if (profile.currentLevel === 'C1' || profile.currentLevel === 'C2') {
+    if (studentText) {
+      return `Strong message. A refined alternative is: **${studentText}**. What nuance would make this more persuasive?`;
+    }
+    return 'Can you present a nuanced opinion and contrast it with one counterpoint?';
+  }
+
+  return 'Can you say one more sentence so we continue your fluency training?';
 }
 
 export function GET() {
@@ -202,50 +226,50 @@ export async function POST(req: Request) {
       );
     }
 
-    const groq = createGroq({ apiKey });
     const recentMessages = normalizedMessages.slice(-14);
     const lastUserMessage = [...recentMessages]
       .reverse()
       .find((m) => m.role === 'user')?.content;
 
-    let output = '';
+    const groq = createGroq({ apiKey });
 
+    let output = '';
     const firstTry = await generateText({
       model: groq('llama-3.1-8b-instant') as any,
       system: buildSystemPrompt(profile),
       messages: convertToCoreMessages(recentMessages as any),
-      maxTokens: 260,
-      temperature: 0.7,
+      maxTokens: 300,
+      temperature: 0.65,
     });
 
     output = (firstTry.text || '').trim();
 
     if (!output) {
-      const compactTranscript = recentMessages
-        .map((m) => `${m.role === 'user' ? 'Student' : 'Coach'}: ${m.content}`)
+      const transcript = recentMessages
+        .map((m) => `${m.role === 'user' ? 'Student' : 'Teacher'}: ${m.content}`)
         .join('\n');
 
       const retryPrompt = [
         buildSystemPrompt(profile),
         '',
-        'Conversation so far:',
-        compactTranscript,
+        'Conversation transcript:',
+        transcript,
         '',
-        'Reply now as the coach with concrete and useful feedback.',
+        'Reply as the teacher now with practical coaching and one follow-up question.',
       ].join('\n');
 
       const retry = await generateText({
         model: groq('llama-3.1-8b-instant') as any,
         prompt: retryPrompt,
-        maxTokens: 260,
-        temperature: 0.7,
+        maxTokens: 300,
+        temperature: 0.65,
       });
 
       output = (retry.text || '').trim();
     }
 
     if (!output) {
-      output = fallbackReply(profile, lastUserMessage);
+      output = levelFallback(profile, lastUserMessage);
     }
 
     return new Response(output, {
