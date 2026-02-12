@@ -1,0 +1,8 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "/^cd /workspaces/englistalk && git add \\. && git commit -m \"Fix: Migração para SDK nativo do Groq \\(@ai-sdk/groq\\)\" && git push origin main$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
+    }
+}
