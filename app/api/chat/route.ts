@@ -3,6 +3,35 @@ import { convertToCoreMessages, generateText } from 'ai';
 
 export const maxDuration = 30;
 
+const systemPrompt = `You are "Talken", a friendly English tutor.
+1. Keep responses short (max 2 sentences).
+2. If the user makes a grammar mistake, correct it using **bold** markdown.
+3. Always end with a simple question.
+4. Speak friendly and encouraging.`;
+
+function normalizeMessages(messages: any[]) {
+  return messages
+    .map((m: any) => ({
+      role: m?.role,
+      content:
+        typeof m?.content === 'string'
+          ? m.content
+          : Array.isArray(m?.content)
+            ? m.content
+                .map((part: any) => (typeof part?.text === 'string' ? part.text : ''))
+                .join(' ')
+                .trim()
+            : '',
+    }))
+    .filter(
+      (m: any) =>
+        (m.role === 'user' || m.role === 'assistant') &&
+        typeof m.content === 'string' &&
+        m.content.trim().length > 0,
+    )
+    .map((m: any) => ({ role: m.role, content: m.content.trim() }));
+}
+
 export function GET() {
   return new Response('Health check OK', { status: 200 });
 }
@@ -14,48 +43,37 @@ export async function POST(req: Request) {
     if (!apiKey) {
       return Response.json(
         {
-          error: 'GROQ_API_KEY não configurada',
-          hint: 'Verifique as variáveis de ambiente no Netlify',
+          error: 'GROQ_API_KEY nao configurada',
+          hint: 'Verifique as variaveis de ambiente no Netlify',
         },
         { status: 500 },
       );
     }
 
-    const body = await req.json();
-    const { messages } = body;
+    let body: any;
+    try {
+      body = await req.json();
+    } catch {
+      return Response.json({ error: 'JSON invalido no body' }, { status: 400 });
+    }
 
-    if (!Array.isArray(messages) || messages.length === 0) {
+    const rawMessages = body?.messages;
+    if (!Array.isArray(rawMessages) || rawMessages.length === 0) {
       return Response.json(
         {
           error: 'messages must be a non-empty array',
-          received: typeof messages,
+          received: typeof rawMessages,
         },
         { status: 400 },
       );
     }
 
-    const normalizedMessages = messages
-      .map((m: any) => ({
-        role: m?.role,
-        content:
-          typeof m?.content === 'string'
-            ? m.content
-            : Array.isArray(m?.content)
-              ? m.content
-                  .map((part: any) =>
-                    typeof part?.text === 'string' ? part.text : '',
-                  )
-                  .join(' ')
-                  .trim()
-              : '',
-      }))
-      .filter((m: any) => (m.role === 'user' || m.role === 'assistant') && m.content);
-
+    const normalizedMessages = normalizeMessages(rawMessages);
     if (normalizedMessages.length === 0) {
       return Response.json(
         {
           error: 'invalid message shape/content',
-          sample: messages?.[0],
+          sample: rawMessages?.[0],
           expected: { role: 'user|assistant', content: 'string' },
         },
         { status: 400 },
@@ -63,23 +81,48 @@ export async function POST(req: Request) {
     }
 
     const groq = createGroq({ apiKey });
+    const recentMessages = normalizedMessages.slice(-12);
+    const lastUserMessage = [...recentMessages]
+      .reverse()
+      .find((m) => m.role === 'user')?.content;
 
-    const result = await generateText({
+    let output = '';
+
+    const firstTry = await generateText({
       model: groq('llama-3.1-8b-instant') as any,
-      system: `You are "Talken", a friendly English tutor.
-1. Keep responses short (max 2 sentences).
-2. If the user makes a grammar mistake, correct it using **bold** markdown.
-3. Always end with a simple question.
-4. Speak friendly and encouraging.`,
-      messages: convertToCoreMessages(normalizedMessages as any),
-      maxTokens: 250,
+      system: systemPrompt,
+      messages: convertToCoreMessages(recentMessages as any),
+      maxTokens: 220,
     });
 
-    const safeText = (result.text || '').trim();
-    const output =
-      safeText.length > 0
-        ? safeText
-        : "I didn't catch that well. Can you try saying that again in one short sentence?";
+    output = (firstTry.text || '').trim();
+
+    if (!output) {
+      const contextText = recentMessages
+        .map((m) => `${m.role === 'user' ? 'Student' : 'Teacher'}: ${m.content}`)
+        .join('\n');
+
+      const retryPrompt = [
+        'Continue this tutoring conversation.',
+        contextText,
+        'Now reply as the Teacher in at most 2 sentences.',
+        'Correct grammar mistakes with **bold** markdown and always end with a simple question.',
+      ].join('\n\n');
+
+      const retry = await generateText({
+        model: groq('llama-3.1-8b-instant') as any,
+        prompt: retryPrompt,
+        maxTokens: 220,
+      });
+
+      output = (retry.text || '').trim();
+    }
+
+    if (!output) {
+      output = lastUserMessage
+        ? `Great, I heard you say: "${lastUserMessage}". Can you tell me one more sentence about your day?`
+        : 'Great, let us continue in English. Can you try one short sentence?';
+    }
 
     return new Response(output, {
       status: 200,
@@ -90,8 +133,8 @@ export async function POST(req: Request) {
   } catch (error: any) {
     return Response.json(
       {
-        error: error.message ?? 'Unknown error',
-        type: error.name,
+        error: error?.message ?? 'Unknown error',
+        type: error?.name,
         hint: 'Check Netlify function logs for details',
       },
       { status: 500 },
