@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef, useCallback } from 'react';
 import { useChatJSON } from '@/lib/useChatJSON';
 import { Mic, MicOff, Zap, X, ShieldCheck, Sparkles, ChevronRight, Play, BrainCircuit, Headphones, Globe, Mail, Lock, ArrowLeft, CheckCircle2 } from 'lucide-react';
 
@@ -11,13 +11,33 @@ export default function TalkenApp() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [isLoadingLogin, setIsLoadingLogin] = useState(false);
-  
-  // Hook AI customizado (JSON ao invés de SSE)
-  const { messages, append, isLoading } = useChatJSON('/api/chat');
 
   const recognitionRef = useRef<any>(null);
   const silenceTimerRef = useRef<any>(null);
   const synthRef = useRef<SpeechSynthesis | null>(null);
+
+  // Definir restartListening primeiro (para usar em callbacks)
+  const restartListening = useCallback(() => {
+    console.log("🎤 [page] Reabrindo microfone");
+    try { 
+      recognitionRef.current?.start(); 
+    } catch(e) {
+      console.warn("⚠️ [page] Erro ao reabrir microfone:", e);
+    } 
+  }, []);
+  
+  // Hook AI customizado (JSON ao invés de SSE)
+  const { messages, append, isLoading } = useChatJSON('/api/chat', {
+    onFinish: () => {
+      console.log("✅ [page] onFinish chamado");
+      setStatus("Sua vez");
+      restartListening();
+    },
+    onError: (error: string) => {
+      console.error("❌ [page] onError chamado:", error);
+      setStatus("Erro de Conexão");
+    }
+  });
 
   // --- LÓGICA DE VOZ (Engine) ---
   useEffect(() => {
@@ -33,8 +53,16 @@ export default function TalkenApp() {
       recognition.interimResults = true;
       recognition.lang = 'en-US';
 
-      recognition.onstart = () => { setIsListening(true); setStatus("Ouvindo..."); };
-      recognition.onend = () => { setIsListening(false); };
+      recognition.onstart = () => { 
+        console.log("🎤 [page] Recognition iniciado");
+        setIsListening(true); 
+        setStatus("Ouvindo..."); 
+      };
+      
+      recognition.onend = () => { 
+        console.log("🎤 [page] Recognition encerrado");
+        setIsListening(false); 
+      };
       
       recognition.onresult = (event: any) => {
         const transcript = Array.from(event.results)
@@ -42,45 +70,70 @@ export default function TalkenApp() {
           .map((result: any) => result.transcript)
           .join('');
 
+        console.log("🎤 [page] Reconhecimento temporário:", transcript, "| Final?", event.results[0]?.isFinal);
+
         if (event.results[0].isFinal) {
-           clearTimeout(silenceTimerRef.current);
-           setStatus("Pensando...");
-           silenceTimerRef.current = setTimeout(() => {
-             recognition.stop();
-             append({ role: 'user', content: transcript });
-           }, 800);
+          console.log("✅ [page] Transcrição final:", transcript);
+          clearTimeout(silenceTimerRef.current);
+          setStatus("Pensando...");
+          silenceTimerRef.current = setTimeout(() => {
+            console.log("📤 [page] Enviando para API:", transcript);
+            recognition.stop();
+            append({ role: 'user', content: transcript });
+          }, 800);
         }
       };
       recognitionRef.current = recognition;
     }
   }, [view, append]);
 
-  const restartListening = () => { try { recognitionRef.current?.start(); } catch(e) {} };
   const toggleListening = () => isListening ? recognitionRef.current?.stop() : restartListening();
-
-  // Restart listening quando isLoading termina
-  useEffect(() => {
-    if (!isLoading && messages.length > 0 && messages[messages.length - 1]?.role === 'user') {
-      setStatus("Sua vez");
-    }
-  }, [isLoading, messages]);
 
   // TTS
   useEffect(() => {
     const lastMsg = messages[messages.length - 1];
-    if (lastMsg?.role === 'assistant' && !isLoading) speak(lastMsg.content);
+    console.log("📊 [page] TTS Effect:", {
+      hasMessages: messages.length > 0,
+      lastMsgRole: lastMsg?.role,
+      isLoading: isLoading,
+      lastMsgContent: lastMsg?.content?.substring(0, 50)
+    });
+
+    if (lastMsg?.role === 'assistant' && !isLoading) {
+      console.log("🔊 [page] Iniciando TTS para:", lastMsg.content.substring(0, 50));
+      speak(lastMsg.content);
+    }
   }, [messages, isLoading]);
 
   const speak = (text: string) => {
-    if (!synthRef.current) return;
+    if (!synthRef.current) {
+      console.warn("⚠️ [page] SpeechSynthesis não disponível");
+      return;
+    }
+    
+    console.log("🔊 [page] speak() chamado com:", text.substring(0, 50));
     synthRef.current.cancel();
     const utterance = new SpeechSynthesisUtterance(text.replace(/[*#]/g, ''));
     utterance.lang = 'en-US';
     const voices = synthRef.current.getVoices();
     const bestVoice = voices.find(v => v.name.includes('Google US English')) || voices[0];
     if (bestVoice) utterance.voice = bestVoice;
-    utterance.onstart = () => setStatus("Falando...");
-    utterance.onend = () => { setStatus("Sua vez"); restartListening(); };
+    
+    utterance.onstart = () => {
+      console.log("🔊 [page] Iniciou a falar");
+      setStatus("Falando...");
+    };
+    
+    utterance.onend = () => {
+      console.log("🔊 [page] Terminou de falar, reabrindo microfone");
+      setStatus("Sua vez");
+      restartListening();
+    };
+    
+    utterance.onerror = (e: any) => {
+      console.error("❌ [page] Erro ao falar:", e);
+    };
+    
     synthRef.current.speak(utterance);
   };
 
