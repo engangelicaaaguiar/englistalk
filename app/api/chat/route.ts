@@ -67,18 +67,32 @@ export async function POST(req: Request) {
 
     // 4. Chamar generateText (SEM STREAMING - TESTE)
     console.log("📡 Chamando generateText com modelo llama-3.1-8b-instant (NOVO)...");
-    const result = await generateText({
-      model: groq('llama-3.1-8b-instant') as any,
-      system: `You are "Talken", a friendly English tutor.
+    let result;
+    try {
+      result = await generateText({
+        model: groq('llama-3.1-8b-instant') as any,
+        system: `You are "Talken", a friendly English tutor.
 1. Keep responses short (max 2 sentences).
 2. If the user makes a grammar mistake, correct it using **bold** markdown.
 3. Always end with a simple question.
 4. Speak friendly and encouraging.`,
-      messages,
-      maxTokens: 250,
-    });
+        messages,
+        maxTokens: 250,
+      });
+      console.log("✅ generateText completado:", {
+        text: result.text?.substring(0, 100),
+        finishReason: result.finishReason,
+        usage: result.usage
+      });
+    } catch (e: any) {
+      console.error("❌ generateText erro:", e.message, e);
+      throw e;
+    }
 
-    console.log("✅ Resposta gerada:", result.text.substring(0, 50));
+    console.log("✅ Resposta final do Groq:", {
+      textLength: result.text.length,
+      text: result.text
+    });
     
     // Retornar como JSON simples (não-streaming)
     return Response.json({ 
