@@ -136,10 +136,11 @@ function personaInstruction(level: CEFRLevel) {
     'Always finish with one easy, inviting follow-up question linked to the topic.',
     'For C1/C2, avoid robotic meta-questions. Prefer reflective invitations such as "That framing sounds more confident. What do you think?"',
     'Output voice tone tag requirement: every reply must start with exactly one tag, either [gentle] or [cheerful].',
+    'Never ask mechanical tasks like "add three words" unless the user explicitly requests drill mode.',
   ].join(' ');
 }
 
-function buildSystemPrompt(profile: ProfilePayload) {
+function buildSystemPrompt(profile: ProfilePayload, isFirstTurn: boolean) {
   const blueprint = CEFR_BLUEPRINT[profile.currentLevel];
   const studentNameLine = profile.fullName
     ? `Student name: ${profile.fullName}. Use it naturally, no more than once every 3 turns.`
@@ -162,17 +163,29 @@ function buildSystemPrompt(profile: ProfilePayload) {
     'Use natural contractions and conversational rhythm so voice sounds human, not robotic.',
     'Never use explicit correction labels. Apply recasting naturally in the sentence flow.',
     'Always end with one simple and direct follow-up question.',
+    'If the student speaks Portuguese, keep your reply in English, but you may add a tiny Portuguese hint in parentheses for one key word.',
     'If student writes a fragment, scaffold a complete sentence before asking the next question.',
+    'Introduce one useful new word naturally in context when possible.',
     'Never say you did not understand if user text exists. Coach from available text.',
+    isFirstTurn
+      ? 'This is the first teacher turn: greet warmly, answer the student greeting naturally, and begin a fluid conversation.'
+      : 'Continue the existing conversation naturally without resetting.',
   ].join('\n');
 }
 
-function levelFallback(profile: ProfilePayload, lastUserMessage: string | undefined) {
+function levelFallback(profile: ProfilePayload, lastUserMessage: string | undefined, isFirstTurn: boolean) {
   const studentText = (lastUserMessage || '').trim();
+
+  if (isFirstTurn) {
+    if (profile.currentLevel === 'A1' || profile.currentLevel === 'A2') {
+      return '[cheerful] Hi! It is great to meet you, and I am happy to practice with you today. New word: "great" means "otimo". How are you feeling today?';
+    }
+    return '[cheerful] Hi! I am glad to meet you, and I am ready for a great conversation. New word: "insightful" means full of good ideas. What topic would you like to start with?';
+  }
 
   if (profile.currentLevel === 'A1') {
     if (studentText) {
-      return `[gentle] I love that you tried, and your idea came through. A natural way to say it is "${studentText}". Can you add three more words to finish your sentence?`;
+      return `[gentle] Nice effort, and I understood you well. A natural way to say it is: "Hi teacher, how are you? How was your day?" New word: "busy" means "ocupado". How was your day today?`;
     }
     return '[gentle] Great start, you are doing well. Can you say one short sentence about your day?';
   }
@@ -253,6 +266,7 @@ async function rewriteWithPersonaGuard(
     '5) End with one simple inviting question.',
     '6) Never start with technical labels like "Strong message" or "Refined alternative".',
     '7) Keep meaning, but sound natural and warm.',
+    '8) Reply in English only.',
     '',
     `Teacher reply to rewrite: ${rawAssistantText}`,
   ].join('\n');
@@ -321,13 +335,15 @@ export async function POST(req: Request) {
     const lastUserMessage = [...recentMessages]
       .reverse()
       .find((m) => m.role === 'user')?.content;
+    const assistantTurns = recentMessages.filter((m) => m.role === 'assistant').length;
+    const isFirstTurn = assistantTurns === 0;
 
     const groq = createGroq({ apiKey });
 
     let output = '';
     const firstTry = await generateText({
       model: groq(PRIMARY_MODEL) as any,
-      system: buildSystemPrompt(profile),
+      system: buildSystemPrompt(profile, isFirstTurn),
       messages: convertToCoreMessages(recentMessages as any),
       maxTokens: 300,
       temperature: 0.65,
@@ -341,7 +357,7 @@ export async function POST(req: Request) {
         .join('\n');
 
       const retryPrompt = [
-        buildSystemPrompt(profile),
+        buildSystemPrompt(profile, isFirstTurn),
         '',
         'Conversation transcript:',
         transcript,
@@ -365,7 +381,7 @@ export async function POST(req: Request) {
     }
 
     if (!output) {
-      output = levelFallback(profile, lastUserMessage);
+      output = levelFallback(profile, lastUserMessage, isFirstTurn);
     }
 
     return new Response(output, {
