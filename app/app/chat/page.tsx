@@ -177,7 +177,10 @@ export default function AppChatPage() {
 
   const speakAssistant = useCallback(
     (text: string) => {
-      const cleanText = text.replace(/[*#]/g, '').trim();
+      const cleanText = text
+        .replace(/^\s*\[(gentle|cheerful)\]\s*/i, '')
+        .replace(/[*#]/g, '')
+        .trim();
       if (!cleanText) return;
 
       setSubtitleAssistant(cleanText);

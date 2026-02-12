@@ -9,6 +9,7 @@ import {
 } from '../../../lib/cefr';
 
 export const maxDuration = 30;
+const PRIMARY_MODEL = 'llama-3.3-70b-versatile';
 
 type ProfilePayload = {
   fullName: string;
@@ -115,16 +116,26 @@ function personaInstruction(level: CEFRLevel) {
       ? 'Prioritize confidence above accuracy in this stage.'
       : 'Balance confidence and accuracy while preserving conversational flow.';
 
+  const c2Rule =
+    level === 'C2' || level === 'C1'
+      ? 'For C1/C2, use rich but warm language: idioms, persuasive framing, and nuanced vocabulary without sounding formal or cold.'
+      : 'Use level-appropriate language while keeping a warm, natural tone.';
+
   return [
-    'ROLE: You are Professora Talken, an empathetic, patient, and highly perceptive English mentor.',
-    'MISSION: Make the student love speaking English and keep conversation fluid.',
+    'ROLE: You are Professora Talken, a warm, empathetic, patient English mentor.',
+    'MISSION: Make the student enjoy speaking English and keep the conversation flowing naturally.',
     confidenceRule,
-    'Response protocol 1 - Validation first: start every reply by validating effort or content (for example: "Great effort!", "Interesting!", "I agree!").',
-    'Response protocol 2 - Invisible correction: when errors are mild, reply with the corrected form naturally without scolding.',
-    'Response protocol 3 - Severe clarity issue: if meaning is unclear, ask gently: "Did you mean X or Y?".',
-    'Response protocol 4 - Never judge: no sarcasm, no condescension, no disapproval tone.',
-    'Response protocol 5 - Keep it short: 2-3 short sentences max.',
-    'Response protocol 6 - Continuity trigger: always end with an easy related question so the student knows what to answer next.',
+    c2Rule,
+    'Human-first filter: never start with technical labels such as "Strong message", "Refined alternative", or "Error detected".',
+    'Always begin by reacting to the student meaning like a real person would.',
+    'Invisible correction (recasting): do not point out mistakes directly; weave the corrected form naturally into your reply.',
+    'If meaning is unclear, ask gently: "Did you mean X or Y?" and keep the student safe.',
+    'Anti-anxiety rule: if the student makes a simple mistake, normalize it with kind, light self-deprecating humor.',
+    'Never judge: no sarcasm, no scolding, no condescending tone.',
+    'Keep replies short: maximum 2-3 short sentences so the student speaks around 70% of the time.',
+    'Always finish with one easy, inviting follow-up question linked to the topic.',
+    'For C1/C2, avoid robotic meta-questions. Prefer reflective invitations such as "That framing sounds more confident. What do you think?"',
+    'Output voice tone tag requirement: every reply must start with exactly one tag, either [gentle] or [cheerful].',
   ].join(' ');
 }
 
@@ -147,8 +158,9 @@ function buildSystemPrompt(profile: ProfilePayload) {
     personaInstruction(profile.currentLevel),
     `Speech context for rhythm: ${profile.voice} at around ${profile.ttsSpeed.toFixed(2)}x speed.`,
     'Always respond in English.',
-    'Keep answer concise: max 3 short sentences.',
-    'If there is a grammar issue, show corrected fragment in **bold** markdown.',
+    'Keep answer concise: max 2-3 short sentences.',
+    'Use natural contractions and conversational rhythm so voice sounds human, not robotic.',
+    'Never use explicit correction labels. Apply recasting naturally in the sentence flow.',
     'Always end with one simple and direct follow-up question.',
     'If student writes a fragment, scaffold a complete sentence before asking the next question.',
     'Never say you did not understand if user text exists. Coach from available text.',
@@ -160,40 +172,99 @@ function levelFallback(profile: ProfilePayload, lastUserMessage: string | undefi
 
   if (profile.currentLevel === 'A1') {
     if (studentText) {
-      return `Great start. A clear version is: **${studentText}**. Can you add 3 more words to finish your idea?`;
+      return `[gentle] I love that you tried, and your idea came through. A natural way to say it is "${studentText}". Can you add three more words to finish your sentence?`;
     }
-    return 'Great start. Can you say one short sentence about your day?';
+    return '[gentle] Great start, you are doing well. Can you say one short sentence about your day?';
   }
 
   if (profile.currentLevel === 'A2') {
     if (studentText) {
-      return `Nice sentence. A better version is: **${studentText}**. Can you connect another idea using because?`;
+      return `[cheerful] Nice effort, and your sentence is clear. A natural way to say it is "${studentText}", and you can extend it with "because". Can you add one more idea using "because"?`;
     }
-    return 'Good. Can you tell me one thing you did yesterday?';
+    return '[gentle] Good job so far. Can you tell me one thing you did yesterday?';
   }
 
   if (profile.currentLevel === 'B1') {
     if (studentText) {
-      return `Good point. A stronger phrasing is: **${studentText}**. Can you add one detail with a richer adjective?`;
+      return `[gentle] That is a good point, and I can see your meaning clearly. A more natural way to phrase it is "${studentText}". Could you add one vivid detail with a stronger adjective?`;
     }
-    return 'Nice. Can you explain one plan you have for this week?';
+    return '[gentle] Nice flow. Can you explain one plan you have for this week?';
   }
 
   if (profile.currentLevel === 'B2') {
     if (studentText) {
-      return `Clear idea. A more natural version is: **${studentText}**. How would you justify this in a work meeting?`;
+      return `[cheerful] Clear idea, and your intent is persuasive already. A polished way to say it is "${studentText}". How would you justify this in a short work meeting?`;
     }
-    return 'Can you defend your opinion with one argument and one example?';
+    return '[gentle] You are doing well with structure. Can you defend your opinion with one argument and one example?';
   }
 
   if (profile.currentLevel === 'C1' || profile.currentLevel === 'C2') {
     if (studentText) {
-      return `Strong message. A refined alternative is: **${studentText}**. What nuance would make this more persuasive?`;
+      return `[gentle] I really like where you're going with this idea, and a natural way to say it is: "${studentText}". A small tone shift can make it sound even more persuasive. What tone do you want to project: confident, diplomatic, or assertive?`;
     }
-    return 'Can you present a nuanced opinion and contrast it with one counterpoint?';
+    return '[gentle] You are ready for a nuanced answer, and that is a great sign. Share one opinion and one counterpoint in a calm, persuasive way. What topic do you want to tackle first?';
   }
 
   return 'Can you say one more sentence so we continue your fluency training?';
+}
+
+function needsPersonaRewrite(text: string) {
+  const trimmed = text.trim();
+  if (!trimmed) return true;
+
+  const startsWithToneTag = /^\[(gentle|cheerful)\]\s+/i.test(trimmed);
+  if (!startsWithToneTag) return true;
+
+  const forbiddenStarts = [
+    'strong message',
+    'refined alternative',
+    'alternative refined',
+    'error detected',
+    'mensagem forte',
+    'alternativa refinada',
+    'erro detectado',
+  ];
+  const firstWords = trimmed
+    .replace(/^\[(gentle|cheerful)\]\s+/i, '')
+    .slice(0, 40)
+    .toLowerCase();
+  if (forbiddenStarts.some((item) => firstWords.startsWith(item))) return true;
+
+  if (!trimmed.includes('?')) return true;
+  if (trimmed.includes('**')) return true;
+  return false;
+}
+
+async function rewriteWithPersonaGuard(
+  groq: ReturnType<typeof createGroq>,
+  profile: ProfilePayload,
+  rawAssistantText: string,
+  lastUserMessage: string | undefined,
+) {
+  const rewritePrompt = [
+    `Current level: ${profile.currentLevel}.`,
+    `Student last message: ${lastUserMessage || '(none)'}`,
+    '',
+    'Rewrite the teacher reply below following these strict rules:',
+    '1) Start with exactly one tone tag: [gentle] or [cheerful].',
+    '2) First sentence must react warmly to student meaning (human-first).',
+    '3) Use invisible correction (recasting), never mention "error", "correct", or "mistake".',
+    '4) Keep 2-3 short sentences total.',
+    '5) End with one simple inviting question.',
+    '6) Never start with technical labels like "Strong message" or "Refined alternative".',
+    '7) Keep meaning, but sound natural and warm.',
+    '',
+    `Teacher reply to rewrite: ${rawAssistantText}`,
+  ].join('\n');
+
+  const rewritten = await generateText({
+    model: groq(PRIMARY_MODEL) as any,
+    prompt: rewritePrompt,
+    maxTokens: 220,
+    temperature: 0.35,
+  });
+
+  return (rewritten.text || '').trim();
 }
 
 export function GET() {
@@ -255,7 +326,7 @@ export async function POST(req: Request) {
 
     let output = '';
     const firstTry = await generateText({
-      model: groq('llama-3.1-8b-instant') as any,
+      model: groq(PRIMARY_MODEL) as any,
       system: buildSystemPrompt(profile),
       messages: convertToCoreMessages(recentMessages as any),
       maxTokens: 300,
@@ -279,13 +350,18 @@ export async function POST(req: Request) {
       ].join('\n');
 
       const retry = await generateText({
-        model: groq('llama-3.1-8b-instant') as any,
+        model: groq(PRIMARY_MODEL) as any,
         prompt: retryPrompt,
         maxTokens: 300,
         temperature: 0.65,
       });
 
       output = (retry.text || '').trim();
+    }
+
+    if (output && needsPersonaRewrite(output)) {
+      const rewritten = await rewriteWithPersonaGuard(groq, profile, output, lastUserMessage);
+      if (rewritten) output = rewritten;
     }
 
     if (!output) {
