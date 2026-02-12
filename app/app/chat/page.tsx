@@ -1,4 +1,4 @@
-﻿'use client';
+'use client';
 
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
@@ -12,9 +12,26 @@ type ChatMessage = {
   content: string;
 };
 
+type Level = 'beginner' | 'intermediate' | 'advanced';
+type Goal = 'daily-conversation' | 'travel' | 'work';
+type Voice = 'en-US' | 'en-GB';
+
+type StudentProfile = {
+  fullName: string;
+  level: Level;
+  goal: Goal;
+  voice: Voice;
+};
+
 export default function AppChatPage() {
   const router = useRouter();
   const emptyReplyFallback = "I did not catch that clearly. Could you repeat in one short sentence?";
+  const defaultProfile: StudentProfile = {
+    fullName: '',
+    level: 'beginner',
+    goal: 'daily-conversation',
+    voice: 'en-US',
+  };
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -27,6 +44,7 @@ export default function AppChatPage() {
   const [apiStatus, setApiStatus] = useState<'idle' | 'ok' | 'error'>('idle');
   const [lastApiMs, setLastApiMs] = useState<number | null>(null);
   const [voiceStatus, setVoiceStatus] = useState<'idle' | 'ok' | 'error'>('idle');
+  const [studentProfile, setStudentProfile] = useState<StudentProfile>(defaultProfile);
 
   const recognitionRef = useRef<any>(null);
   const synthRef = useRef<SpeechSynthesis | null>(null);
@@ -44,10 +62,32 @@ export default function AppChatPage() {
 
   useEffect(() => {
     const checkSession = async () => {
-      const { data } = await getSupabaseClient().auth.getSession();
-      if (!data.session) {
+      const supabase = getSupabaseClient();
+      const { data } = await supabase.auth.getSession();
+      if (!data.session?.user) {
         router.replace('/auth/login');
+        return;
       }
+
+      const { data: userData } = await supabase.auth.getUser();
+      const meta = userData.user?.user_metadata || data.session.user.user_metadata || {};
+      const safeLevel: Level =
+        meta.level === 'beginner' || meta.level === 'intermediate' || meta.level === 'advanced'
+          ? meta.level
+          : 'beginner';
+      const safeGoal: Goal =
+        meta.goal === 'daily-conversation' || meta.goal === 'travel' || meta.goal === 'work'
+          ? meta.goal
+          : 'daily-conversation';
+      const safeVoice: Voice = meta.voice === 'en-US' || meta.voice === 'en-GB' ? meta.voice : 'en-US';
+      const fullName = typeof meta.full_name === 'string' ? meta.full_name : '';
+
+      setStudentProfile({
+        fullName,
+        level: safeLevel,
+        goal: safeGoal,
+        voice: safeVoice,
+      });
     };
     void checkSession();
   }, [router]);
@@ -107,10 +147,12 @@ export default function AppChatPage() {
       setStatus('Professor falando...');
       synthRef.current.cancel();
       const utterance = new SpeechSynthesisUtterance(cleanText);
-      utterance.lang = 'en-US';
+      utterance.lang = studentProfile.voice;
       utterance.rate = 0.98;
       const voices = synthRef.current.getVoices();
       const preferred =
+        voices.find((v) => v.lang?.toLowerCase() === studentProfile.voice.toLowerCase()) ||
+        voices.find((v) => v.lang?.toLowerCase().startsWith(studentProfile.voice.slice(0, 2).toLowerCase())) ||
         voices.find((v) => v.lang?.toLowerCase().startsWith('en-us')) ||
         voices.find((v) => v.lang?.toLowerCase().startsWith('en')) ||
         null;
@@ -135,7 +177,7 @@ export default function AppChatPage() {
         isSpeakingRef.current = false;
         setVoiceStatus('error');
         const backup = new SpeechSynthesisUtterance(cleanText);
-        backup.lang = 'en-US';
+        backup.lang = studentProfile.voice;
         backup.rate = 1;
         backup.onstart = () => {
           isSpeakingRef.current = true;
@@ -165,7 +207,7 @@ export default function AppChatPage() {
       synthRef.current.resume();
       synthRef.current.speak(utterance);
     },
-    [startListening],
+    [startListening, studentProfile.voice],
   );
 
   const requestAssistant = useCallback(async (history: ChatMessage[]) => {
@@ -178,6 +220,7 @@ export default function AppChatPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           messages: history.map((m) => ({ role: m.role, content: m.content })),
+          profile: studentProfile,
         }),
         signal: controller.signal,
       });
@@ -213,7 +256,7 @@ export default function AppChatPage() {
     } finally {
       clearTimeout(timeout);
     }
-  }, []);
+  }, [studentProfile]);
 
   const sendTranscript = useCallback(
     async (spokenText: string) => {
@@ -283,7 +326,7 @@ export default function AppChatPage() {
     }
 
     const recognition = new SpeechRecognition();
-    recognition.lang = 'en-US';
+    recognition.lang = studentProfile.voice;
     recognition.interimResults = true;
     recognition.continuous = false;
 
@@ -375,7 +418,7 @@ export default function AppChatPage() {
       recognition.stop();
       synthRef.current?.cancel();
     };
-  }, [sendTranscript, startListening]);
+  }, [sendTranscript, startListening, studentProfile.voice]);
 
   const logout = async () => {
     shouldAutoListenRef.current = false;
@@ -392,6 +435,12 @@ export default function AppChatPage() {
     if (isListening) return 'border-emerald-400/60 bg-emerald-400/10';
     return 'border-slate-300 bg-white hover:border-slate-400';
   }, [isListening, isLoading]);
+
+  const coachMode = useMemo(() => {
+    if (studentProfile.level === 'beginner') return 'Coach beginner';
+    if (studentProfile.level === 'intermediate') return 'Coach intermediate';
+    return 'Coach advanced';
+  }, [studentProfile.level]);
 
   const toggleVoice = () => {
     const next = !voiceEnabled;
@@ -423,7 +472,10 @@ export default function AppChatPage() {
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between rounded-2xl border bg-white p-4 shadow-sm">
-        <h1 className="text-xl font-semibold">Jornada Falada</h1>
+        <div>
+          <h1 className="text-xl font-semibold">Jornada Falada</h1>
+          <p className="text-xs text-slate-500">{coachMode} - objetivo {studentProfile.goal}</p>
+        </div>
         <div className="flex gap-2">
           <Link href="/app/settings" className="inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm">
             <Settings size={16} />

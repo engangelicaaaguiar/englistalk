@@ -18,7 +18,22 @@ export default function SettingsPage() {
     });
 
     getSupabaseClient().auth.getUser().then(({ data }) => {
-      setFullName((data.user?.user_metadata?.full_name as string) || '');
+      const meta = data.user?.user_metadata || {};
+      setFullName((meta.full_name as string) || '');
+
+      const safeLevel =
+        meta.level === 'beginner' || meta.level === 'intermediate' || meta.level === 'advanced'
+          ? meta.level
+          : 'beginner';
+      const safeGoal =
+        meta.goal === 'daily-conversation' || meta.goal === 'travel' || meta.goal === 'work'
+          ? meta.goal
+          : 'daily-conversation';
+      const safeVoice = meta.voice === 'en-US' || meta.voice === 'en-GB' ? meta.voice : 'en-US';
+
+      setLevel(safeLevel);
+      setGoal(safeGoal);
+      setVoice(safeVoice);
     });
   }, [router]);
 
@@ -33,22 +48,27 @@ export default function SettingsPage() {
       },
     });
 
-    setStatus(error ? error.message : 'Preferências salvas!');
+    setStatus(error ? error.message : 'Preferencias salvas!');
   };
 
   return (
     <div className="mx-auto max-w-2xl rounded-2xl border bg-white p-6 shadow-sm">
-      <h1 className="text-2xl font-bold">Configurações</h1>
-      <p className="mt-1 text-sm text-slate-600">Perfil, nível e objetivos.</p>
+      <h1 className="text-2xl font-bold">Configuracoes</h1>
+      <p className="mt-1 text-sm text-slate-600">Perfil, nivel e objetivos.</p>
       <form onSubmit={save} className="mt-6 grid gap-4">
-        <input value={fullName} onChange={(e) => setFullName(e.target.value)} className="rounded-xl border px-3 py-2" placeholder="Nome completo" />
+        <input
+          value={fullName}
+          onChange={(e) => setFullName(e.target.value)}
+          className="rounded-xl border px-3 py-2"
+          placeholder="Nome completo"
+        />
         <select value={level} onChange={(e) => setLevel(e.target.value)} className="rounded-xl border px-3 py-2">
           <option value="beginner">Beginner</option>
           <option value="intermediate">Intermediate</option>
           <option value="advanced">Advanced</option>
         </select>
         <select value={goal} onChange={(e) => setGoal(e.target.value)} className="rounded-xl border px-3 py-2">
-          <option value="daily-conversation">Conversação diária</option>
+          <option value="daily-conversation">Conversacao diaria</option>
           <option value="travel">Viagens</option>
           <option value="work">Trabalho</option>
         </select>
