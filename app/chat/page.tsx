@@ -6,7 +6,8 @@ import ChatInput from '../../components/ChatInput.tsx'
 
 export default function ChatPage() {
   const { messages, input, handleInputChange, handleSubmit } = useChat({
-    api: '/api/chat'
+    api: '/api/chat',
+    streamMode: 'text'
   })
 
   return (

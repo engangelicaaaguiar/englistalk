@@ -15,6 +15,7 @@ export default function TalkenApp() {
   // Hook AI
   const { messages, append, isLoading } = useChat({
     api: '/api/chat',
+    streamMode: 'text',
     onError: () => setStatus("Erro de Conexão"),
     onFinish: () => {
       setStatus("Sua vez");
@@ -24,11 +25,15 @@ export default function TalkenApp() {
 
   const recognitionRef = useRef<any>(null);
   const silenceTimerRef = useRef<any>(null);
+  const restartTimerRef = useRef<any>(null);
+  const recognitionActiveRef = useRef(false);
+  const shouldListenRef = useRef(false);
   const synthRef = useRef<SpeechSynthesis | null>(null);
 
   // --- LÓGICA DE VOZ (Engine) ---
   useEffect(() => {
     if (typeof window !== 'undefined' && view === 'app') {
+      shouldListenRef.current = true;
       synthRef.current = window.speechSynthesis;
       // @ts-ignore
       const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -36,51 +41,119 @@ export default function TalkenApp() {
       if (!SpeechRecognition) return;
 
       const recognition = new SpeechRecognition();
-      recognition.continuous = true; 
+      recognition.continuous = true;
       recognition.interimResults = true;
       recognition.lang = 'en-US';
 
-      recognition.onstart = () => { setIsListening(true); setStatus("Ouvindo..."); };
-      recognition.onend = () => { setIsListening(false); };
-      
+      recognition.onstart = () => {
+        recognitionActiveRef.current = true;
+        setIsListening(true);
+        setStatus('Ouvindo...');
+      };
+
+      recognition.onend = () => {
+        recognitionActiveRef.current = false;
+        setIsListening(false);
+      };
+
       recognition.onresult = (event: any) => {
         const transcript = Array.from(event.results)
           .map((result: any) => result[0])
           .map((result: any) => result.transcript)
-          .join('');
+          .join('')
+          .trim();
 
-        if (event.results[0].isFinal) {
-           clearTimeout(silenceTimerRef.current);
-           setStatus("Pensando...");
-           silenceTimerRef.current = setTimeout(() => {
-             recognition.stop();
-             append({ role: 'user', content: transcript });
-           }, 800);
+        if (event.results[0].isFinal && transcript) {
+          clearTimeout(silenceTimerRef.current);
+          setStatus('Pensando...');
+          silenceTimerRef.current = setTimeout(() => {
+            shouldListenRef.current = false;
+            if (recognitionActiveRef.current) {
+              recognition.stop();
+            }
+            append({ role: 'user', content: transcript });
+          }, 500);
         }
       };
+
       recognitionRef.current = recognition;
+
+      return () => {
+        clearTimeout(silenceTimerRef.current);
+        clearTimeout(restartTimerRef.current);
+        shouldListenRef.current = false;
+        try {
+          recognition.abort();
+        } catch {}
+      };
     }
   }, [view, append]);
 
-  const restartListening = () => { try { recognitionRef.current?.start(); } catch(e) {} };
-  const toggleListening = () => isListening ? recognitionRef.current?.stop() : restartListening();
+  const restartListening = () => {
+    const recognition = recognitionRef.current;
+    if (!recognition || !shouldListenRef.current || recognitionActiveRef.current || isLoading) {
+      return;
+    }
+
+    clearTimeout(restartTimerRef.current);
+    restartTimerRef.current = setTimeout(() => {
+      if (!recognitionActiveRef.current && shouldListenRef.current && !isLoading) {
+        try {
+          recognition.start();
+        } catch {}
+      }
+    }, 250);
+  };
+
+  const toggleListening = () => {
+    const recognition = recognitionRef.current;
+    if (!recognition) return;
+
+    if (recognitionActiveRef.current) {
+      shouldListenRef.current = false;
+      recognition.stop();
+      setStatus('Pausado');
+      return;
+    }
+
+    shouldListenRef.current = true;
+    restartListening();
+  };
 
   // TTS
   useEffect(() => {
     const lastMsg = messages[messages.length - 1];
-    if (lastMsg?.role === 'assistant' && !isLoading) speak(lastMsg.content);
+    if (lastMsg?.role === 'assistant' && !isLoading) speak(String(lastMsg.content || ''));
   }, [messages, isLoading]);
 
   const speak = (text: string) => {
-    if (!synthRef.current) return;
+    const cleanText = text.replace(/[*#]/g, '').trim();
+    if (!synthRef.current || !cleanText) {
+      shouldListenRef.current = true;
+      setStatus('Sua vez');
+      restartListening();
+      return;
+    }
+
+    shouldListenRef.current = false;
+    if (recognitionActiveRef.current) {
+      try {
+        recognitionRef.current?.stop();
+      } catch {}
+    }
+
     synthRef.current.cancel();
-    const utterance = new SpeechSynthesisUtterance(text.replace(/[*#]/g, ''));
+    const utterance = new SpeechSynthesisUtterance(cleanText);
     utterance.lang = 'en-US';
     const voices = synthRef.current.getVoices();
     const bestVoice = voices.find(v => v.name.includes('Google US English')) || voices[0];
     if (bestVoice) utterance.voice = bestVoice;
-    utterance.onstart = () => setStatus("Falando...");
-    utterance.onend = () => { setStatus("Sua vez"); restartListening(); };
+    utterance.onstart = () => setStatus('Falando...');
+    utterance.onend = () => {
+      setStatus('Sua vez');
+      shouldListenRef.current = true;
+      restartListening();
+    };
     synthRef.current.speak(utterance);
   };
 
@@ -91,6 +164,8 @@ export default function TalkenApp() {
     setTimeout(() => {
       setIsLoadingLogin(false);
       setView('app');
+      shouldListenRef.current = true;
+      setTimeout(() => restartListening(), 300);
     }, 1500);
   };
 
