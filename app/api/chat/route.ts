@@ -45,6 +45,23 @@ type BrainSession = {
   language_gap_count: number;
 };
 
+type RuntimeMetrics = {
+  studentTokens: number;
+  teacherTokens: number;
+  teacherTalkPct: number;
+  ptRatio: number;
+  shortMessageStreak: number;
+};
+
+type TransitionEval = {
+  nextPhase: BrainPhase;
+  reason: string;
+  role: string;
+  outcomeAchieved: boolean;
+  gentleScaffolding: boolean;
+  shortenResponse: boolean;
+};
+
 function tokenCount(text: string | undefined) {
   if (!text) return 0;
   return text
@@ -59,6 +76,126 @@ function inferPhase(turnCount: number): BrainPhase {
   if (turnCount <= 7) return 'planning_refine';
   if (turnCount <= 9) return 'report';
   return 'language_focus';
+}
+
+function phaseRole(phase: BrainPhase) {
+  if (phase === 'pre_task') return 'Instigator & Primer';
+  if (phase === 'task_cycle') return 'Invisible Monitor';
+  if (phase === 'planning_refine') return 'Language Advisor';
+  if (phase === 'report') return 'Chairperson';
+  return 'Analyst & Detective';
+}
+
+function detectStartIntent(text: string) {
+  return /\b(ok(ay)?|let'?s start|i'?m ready|ready|vamos|bora|pode comecar)\b/i.test(text);
+}
+
+function detectPlanningDone(text: string) {
+  return /\b(i'?m done|final version|this is my final|finished|done|pronto|vers[aã]o final)\b/i.test(text);
+}
+
+function detectReportEnd(text: string) {
+  return /\b(that'?s all|all done|finished|done|encerrado|fim|end)\b/i.test(text);
+}
+
+function estimatePtRatio(text: string) {
+  const tokens = text
+    .toLowerCase()
+    .replace(/[^a-zà-ÿ'\s]/g, ' ')
+    .split(/\s+/)
+    .filter(Boolean);
+  if (tokens.length === 0) return 0;
+
+  const ptHints = new Set([
+    'eu', 'voce', 'você', 'meu', 'minha', 'bom', 'boa', 'hoje', 'ontem', 'amanha', 'amanhã',
+    'quero', 'gosto', 'nao', 'não', 'com', 'para', 'professora', 'dia', 'como', 'vai',
+  ]);
+
+  const ptCount = tokens.filter((t) => ptHints.has(t)).length;
+  return ptCount / tokens.length;
+}
+
+function computeRuntimeMetrics(recentMessages: Array<{ role: string; content: string }>, lastUserText: string) {
+  const studentMessages = recentMessages.filter((m) => m.role === 'user');
+  const teacherMessages = recentMessages.filter((m) => m.role === 'assistant');
+  const studentTokens = studentMessages.reduce((acc, m) => acc + tokenCount(m.content), 0);
+  const teacherTokens = teacherMessages.reduce((acc, m) => acc + tokenCount(m.content), 0);
+  const total = studentTokens + teacherTokens;
+  const teacherTalkPct = total === 0 ? 0 : Math.round((teacherTokens / total) * 100);
+  const ptRatio = estimatePtRatio(lastUserText);
+
+  const shortMessageStreak = [...studentMessages]
+    .reverse()
+    .slice(0, 3)
+    .reduce((acc, m) => (tokenCount(m.content) <= 3 ? acc + 1 : acc), 0);
+
+  return {
+    studentTokens,
+    teacherTokens,
+    teacherTalkPct,
+    ptRatio,
+    shortMessageStreak,
+  } as RuntimeMetrics;
+}
+
+function detectOutcomeAchieved(moduleName: LearningModule, recentMessages: Array<{ role: string; content: string }>) {
+  const userText = recentMessages
+    .filter((m) => m.role === 'user')
+    .map((m) => m.content.toLowerCase())
+    .join(' ');
+
+  if (moduleName === 'Travel_Logistics') {
+    return /\b(book(ed)?|ticket|platform|check[- ]?in|reservation|hotel|room|train|flight)\b/.test(userText);
+  }
+  if (moduleName === 'Work_Communication') {
+    return /\b(meeting|deadline|status|deliverable|client|proposal|agree|decision)\b/.test(userText);
+  }
+  if (moduleName === 'Social_Small_Talk') {
+    return /\b(hobby|weekend|family|friend|music|movie|like|enjoy)\b/.test(userText);
+  }
+  if (moduleName === 'Exam_Preparation') {
+    return /\b(on the one hand|on the other hand|however|in conclusion|argument|counterpoint)\b/.test(userText);
+  }
+  return /\b(today|yesterday|routine|work|study|plan|because)\b/.test(userText);
+}
+
+function evaluateTransition(params: {
+  phase: BrainPhase;
+  lastUserText: string;
+  moduleName: LearningModule;
+  recentMessages: Array<{ role: string; content: string }>;
+  metrics: RuntimeMetrics;
+}) {
+  const { phase, lastUserText, moduleName, recentMessages, metrics } = params;
+  const outcomeAchieved = detectOutcomeAchieved(moduleName, recentMessages);
+  const gentleScaffolding = metrics.ptRatio >= 0.35 || metrics.shortMessageStreak >= 2;
+  const shortenResponse = metrics.teacherTalkPct > 30;
+
+  let nextPhase = phase;
+  let reason = 'no_transition';
+
+  if (phase === 'pre_task' && (detectStartIntent(lastUserText) || tokenCount(lastUserText) >= 5)) {
+    nextPhase = 'task_cycle';
+    reason = 'start_intent_detected';
+  } else if (phase === 'task_cycle' && outcomeAchieved) {
+    nextPhase = 'planning_refine';
+    reason = 'non_linguistic_outcome_achieved';
+  } else if (phase === 'planning_refine' && detectPlanningDone(lastUserText)) {
+    nextPhase = 'report';
+    reason = 'planning_completed';
+  } else if (phase === 'report' && detectReportEnd(lastUserText)) {
+    nextPhase = 'language_focus';
+    reason = 'report_closed';
+  }
+
+  return {
+    nextPhase,
+    reason,
+    role: phaseRole(nextPhase),
+    outcomeAchieved,
+    gentleScaffolding,
+    shortenResponse,
+  } as TransitionEval;
 }
 
 function detectScenario(moduleName: LearningModule) {
@@ -255,13 +392,12 @@ async function persistBrainTurn(params: {
   }
 
   const nextTurnCount = turnIndex;
-  const nextPhase = inferPhase(nextTurnCount);
 
   await supabase
     .from('talken_sessions')
     .update({
       turn_count: nextTurnCount,
-      phase: nextPhase,
+      phase,
       stt_student_tokens: Number(session.stt_student_tokens || 0) + studentTokens,
       stt_teacher_tokens: Number(session.stt_teacher_tokens || 0) + teacherTokens,
       language_gap_count:
@@ -389,6 +525,7 @@ function buildSystemPrompt(
   scenario: string,
   emergentHints: string,
   sttDirective: string,
+  transition: TransitionEval,
 ) {
   const blueprint = CEFR_BLUEPRINT[profile.currentLevel];
   const studentNameLine = profile.fullName
@@ -406,9 +543,20 @@ function buildSystemPrompt(
     correctionDirective(profile.correctionMode),
     moduleDirective(profile.currentModule),
     `Authentic scenario now: ${scenario}.`,
+    `Pedagogical role now: ${transition.role}.`,
+    `Transition reason: ${transition.reason}.`,
     phaseMethodology(phase),
     sttDirective,
     emergentHints,
+    transition.shortenResponse
+      ? 'Internal control: STT exceeded 30% for teacher. Apply shorten_response now.'
+      : 'Internal control: STT within target.',
+    transition.gentleScaffolding
+      ? 'Internal control: Anxiety monitor high. Enable Gentle_Scaffolding with lower cognitive load.'
+      : 'Internal control: Anxiety monitor normal.',
+    transition.outcomeAchieved
+      ? 'Outcome tracking: non-linguistic objective appears achieved. Move learner toward planning/report style.'
+      : 'Outcome tracking: objective still in progress. Keep focus on task execution and meaning.',
     personaInstruction(profile.currentLevel),
     `Speech context for rhythm: ${profile.voice} at around ${profile.ttsSpeed.toFixed(2)}x speed.`,
     'Always respond in English.',
@@ -596,14 +744,25 @@ export async function POST(req: Request) {
     const lastUserMessage = [...recentMessages]
       .reverse()
       .find((m) => m.role === 'user')?.content;
+    const safeLastUser = (lastUserMessage || '').trim();
     const assistantTurns = recentMessages.filter((m) => m.role === 'assistant').length;
     const isFirstTurn = assistantTurns === 0;
     const brainSession = await loadOrCreateBrainSession(profile);
     const phase = brainSession?.phase || inferPhase(assistantTurns);
     const scenario = brainSession?.scenario || detectScenario(profile.currentModule);
     const emergentHints = await loadEmergentLanguageHints(brainSession);
-    const sttDirective =
-      tokenCount(lastUserMessage) >= 6
+    const metrics = computeRuntimeMetrics(recentMessages as any, safeLastUser);
+    const transition = evaluateTransition({
+      phase,
+      lastUserText: safeLastUser,
+      moduleName: profile.currentModule,
+      recentMessages: recentMessages as any,
+      metrics,
+    });
+    const activePhase = transition.nextPhase;
+    const sttDirective = transition.shortenResponse
+      ? 'Student Talking Time control: your response must be shorter than the student response and use at most 2 short sentences before the question.'
+      : tokenCount(lastUserMessage) >= 6
         ? 'Student message was long enough: keep your response shorter than the student response.'
         : 'Student message was short: keep your response concise and ask one easy continuation question.';
 
@@ -613,10 +772,11 @@ export async function POST(req: Request) {
     const systemPrompt = buildSystemPrompt(
       profile,
       isFirstTurn,
-      phase,
+      activePhase,
       scenario,
       emergentHints,
       sttDirective,
+      transition,
     );
 
     const firstTry = await generateText({
@@ -666,7 +826,7 @@ export async function POST(req: Request) {
       await persistBrainTurn({
         profile,
         session: brainSession,
-        phase,
+        phase: activePhase,
         userText: lastUserMessage,
         assistantText: output,
       });
