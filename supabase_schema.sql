@@ -37,3 +37,10 @@ create policy "Profiles: owner can select and update" on public.profiles
 alter table public.messages enable row level security;
 create policy "Messages: owner can access" on public.messages
   for all using (user_id = auth.uid()) with check (user_id = auth.uid());
+
+-- Waitlist Talken Pro
+create table if not exists public.waitlist_pro (
+  id uuid primary key default gen_random_uuid(),
+  email text unique not null,
+  created_at timestamptz not null default now()
+);

@@ -1,23 +1,29 @@
-import './globals.css'
+import Link from 'next/link';
+import './globals.css';
 
 export const metadata = {
-  title: 'EnglisTalk - English Tutor',
-  description: 'MicroSaaS English tutor powered by AI'
-}
+  title: 'Talken - English Tutor',
+  description: 'MicroSaaS English tutor powered by AI',
+};
 
-export default function RootLayout({ children }: { children: any }) {
+export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="pt-BR">
-      <body>
+      <body className="bg-slate-50 text-slate-900">
         <div className="min-h-screen flex flex-col">
-          <header className="w-full py-4 bg-white/60 shadow-sm">
-            <div className="max-w-4xl mx-auto px-4">
-              <h1 className="text-lg font-semibold">EnglisTalk</h1>
+          <header className="w-full border-b bg-white/80 backdrop-blur">
+            <div className="mx-auto flex w-full max-w-5xl items-center justify-between px-4 py-4">
+              <Link href="/" className="text-lg font-bold">Talken</Link>
+              <nav className="flex items-center gap-4 text-sm">
+                <Link href="/pricing" className="hover:underline">Pricing</Link>
+                <Link href="/auth/login" className="hover:underline">Login</Link>
+                <Link href="/app/chat" className="rounded-lg bg-slate-900 px-3 py-1.5 font-semibold text-white">Abrir App</Link>
+              </nav>
             </div>
           </header>
-          <main className="flex-1 max-w-4xl mx-auto w-full px-4 py-8">{children}</main>
+          <main className="mx-auto w-full max-w-5xl flex-1 px-4 py-8">{children}</main>
         </div>
       </body>
     </html>
-  )
+  );
 }
