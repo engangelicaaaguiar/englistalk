@@ -32,6 +32,7 @@ export default function AppChatPage() {
   const synthRef = useRef<SpeechSynthesis | null>(null);
   const shouldAutoListenRef = useRef(false);
   const isSpeakingRef = useRef(false);
+  const ttsPendingRef = useRef(false);
   const pendingSendRef = useRef(false);
   const interimTranscriptRef = useRef('');
   const finalTranscriptRef = useRef('');
@@ -57,12 +58,19 @@ export default function AppChatPage() {
       setStatus('Seu navegador nao suporta reconhecimento de voz.');
       return;
     }
-    if (pendingSendRef.current || isLoading || isSpeakingRef.current) return;
+    if (pendingSendRef.current || isLoading || isSpeakingRef.current || ttsPendingRef.current) {
+      return;
+    }
     try {
       recognitionRef.current.start();
     } catch {
       setTimeout(() => {
-        if (shouldAutoListenRef.current && !pendingSendRef.current && !isSpeakingRef.current) {
+        if (
+          shouldAutoListenRef.current &&
+          !pendingSendRef.current &&
+          !isSpeakingRef.current &&
+          !ttsPendingRef.current
+        ) {
           try {
             recognitionRef.current?.start();
           } catch {
@@ -89,10 +97,14 @@ export default function AppChatPage() {
       setSubtitleAssistant(cleanText);
       if (!synthRef.current) {
         setVoiceStatus('error');
+        ttsPendingRef.current = false;
         if (shouldAutoListenRef.current) startListening();
         return;
       }
 
+      ttsPendingRef.current = true;
+      isSpeakingRef.current = true;
+      setStatus('Professor falando...');
       synthRef.current.cancel();
       const utterance = new SpeechSynthesisUtterance(cleanText);
       utterance.lang = 'en-US';
@@ -105,12 +117,12 @@ export default function AppChatPage() {
       if (preferred) utterance.voice = preferred;
 
       utterance.onstart = () => {
-        isSpeakingRef.current = true;
         setVoiceStatus('ok');
         setStatus('Professor falando...');
       };
 
       utterance.onend = () => {
+        ttsPendingRef.current = false;
         isSpeakingRef.current = false;
         setStatus('Sua vez. Fale novamente.');
         if (shouldAutoListenRef.current) {
@@ -119,11 +131,34 @@ export default function AppChatPage() {
       };
 
       utterance.onerror = () => {
+        ttsPendingRef.current = false;
         isSpeakingRef.current = false;
         setVoiceStatus('error');
-        setStatus('Falha no audio da resposta.');
-        if (shouldAutoListenRef.current) {
-          startListening();
+        const backup = new SpeechSynthesisUtterance(cleanText);
+        backup.lang = 'en-US';
+        backup.rate = 1;
+        backup.onstart = () => {
+          isSpeakingRef.current = true;
+          setVoiceStatus('ok');
+          setStatus('Professor falando...');
+        };
+        backup.onend = () => {
+          isSpeakingRef.current = false;
+          setStatus('Sua vez. Fale novamente.');
+          if (shouldAutoListenRef.current) startListening();
+        };
+        backup.onerror = () => {
+          isSpeakingRef.current = false;
+          setVoiceStatus('error');
+          setStatus('Falha no audio da resposta. Toque no balao para retomar.');
+          if (shouldAutoListenRef.current) startListening();
+        };
+        try {
+          synthRef.current?.cancel();
+          synthRef.current?.speak(backup);
+        } catch {
+          setStatus('Falha no audio da resposta. Toque no balao para retomar.');
+          if (shouldAutoListenRef.current) startListening();
         }
       };
 
@@ -289,7 +324,12 @@ export default function AppChatPage() {
         return;
       }
 
-      if (shouldAutoListenRef.current && !pendingSendRef.current && !isSpeakingRef.current) {
+      if (
+        shouldAutoListenRef.current &&
+        !pendingSendRef.current &&
+        !isSpeakingRef.current &&
+        !ttsPendingRef.current
+      ) {
         startListening();
         return;
       }
@@ -319,7 +359,12 @@ export default function AppChatPage() {
 
       setStatus('Erro no microfone. Verifique a permissao.');
       setVoiceStatus('error');
-      if (shouldAutoListenRef.current && !pendingSendRef.current && !isSpeakingRef.current) {
+      if (
+        shouldAutoListenRef.current &&
+        !pendingSendRef.current &&
+        !isSpeakingRef.current &&
+        !ttsPendingRef.current
+      ) {
         startListening();
       }
     };
@@ -355,8 +400,20 @@ export default function AppChatPage() {
 
     if (!next) {
       stopListening();
+      ttsPendingRef.current = false;
+      isSpeakingRef.current = false;
+      synthRef.current?.cancel();
       setStatus('Conversa por voz pausada.');
       return;
+    }
+
+    try {
+      const unlock = new SpeechSynthesisUtterance(' ');
+      unlock.volume = 0;
+      synthRef.current?.speak(unlock);
+      synthRef.current?.cancel();
+    } catch {
+      // ignore unlock failures and continue
     }
 
     setStatus('Ouvindo voce...');
