@@ -35,7 +35,7 @@ type ProfilePayload = {
   ttsSpeed: number;
 };
 
-const SILENCE_GRACE_MS = 2000;
+const SILENCE_GRACE_MS = 3000;
 
 const EMPTY_METRICS: ConfidenceMetrics = {
   totalWords: 0,
@@ -92,6 +92,30 @@ export default function AppChatPage() {
   const fullNameRef = useRef('');
   const userIdRef = useRef('');
   const silenceDecisionTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const scheduleSilenceCutoff = useCallback(() => {
+    if (silenceDecisionTimeoutRef.current) {
+      clearTimeout(silenceDecisionTimeoutRef.current);
+    }
+
+    silenceDecisionTimeoutRef.current = setTimeout(() => {
+      silenceDecisionTimeoutRef.current = null;
+
+      if (
+        !pendingSendRef.current &&
+        !isSpeakingRef.current &&
+        !ttsPendingRef.current &&
+        recognitionRef.current
+      ) {
+        setStatus('Pausa detectada. Enviando sua fala...');
+        try {
+          recognitionRef.current.stop();
+        } catch {
+          // no-op
+        }
+      }
+    }, SILENCE_GRACE_MS);
+  }, []);
 
   useEffect(() => {
     messagesRef.current = messages;
@@ -440,11 +464,6 @@ export default function AppChatPage() {
     };
 
     recognition.onresult = (event: any) => {
-      if (silenceDecisionTimeoutRef.current) {
-        clearTimeout(silenceDecisionTimeoutRef.current);
-        silenceDecisionTimeoutRef.current = null;
-      }
-
       let finalText = '';
       let interimText = '';
 
@@ -462,6 +481,8 @@ export default function AppChatPage() {
       interimTranscriptRef.current = interimText.trim();
       const liveTranscript = `${finalTranscriptRef.current} ${interimTranscriptRef.current}`.trim();
       if (liveTranscript) setSubtitleUser(liveTranscript);
+
+      scheduleSilenceCutoff();
     };
 
     recognition.onend = () => {
@@ -469,32 +490,28 @@ export default function AppChatPage() {
 
       if (silenceDecisionTimeoutRef.current) {
         clearTimeout(silenceDecisionTimeoutRef.current);
+        silenceDecisionTimeoutRef.current = null;
       }
 
-      setStatus('Aguardando fim da pausa...');
-      silenceDecisionTimeoutRef.current = setTimeout(() => {
-        silenceDecisionTimeoutRef.current = null;
+      const transcript = `${finalTranscriptRef.current} ${interimTranscriptRef.current}`.trim();
+      if (transcript && !pendingSendRef.current) {
+        finalTranscriptRef.current = '';
+        interimTranscriptRef.current = '';
+        void sendTranscript(transcript);
+        return;
+      }
 
-        const transcript = `${finalTranscriptRef.current} ${interimTranscriptRef.current}`.trim();
-        if (transcript && !pendingSendRef.current) {
-          finalTranscriptRef.current = '';
-          interimTranscriptRef.current = '';
-          void sendTranscript(transcript);
-          return;
-        }
+      if (
+        shouldAutoListenRef.current &&
+        !pendingSendRef.current &&
+        !isSpeakingRef.current &&
+        !ttsPendingRef.current
+      ) {
+        startListening();
+        return;
+      }
 
-        if (
-          shouldAutoListenRef.current &&
-          !pendingSendRef.current &&
-          !isSpeakingRef.current &&
-          !ttsPendingRef.current
-        ) {
-          startListening();
-          return;
-        }
-
-        setStatus('Toque no balao e fale em ingles');
-      }, SILENCE_GRACE_MS);
+      setStatus('Toque no balao e fale em ingles');
     };
 
     recognition.onerror = (event: any) => {
@@ -549,7 +566,7 @@ export default function AppChatPage() {
       recognition.stop();
       synthRef.current?.cancel();
     };
-  }, [progress?.settings.voice, sendTranscript, startListening]);
+  }, [progress?.settings.voice, scheduleSilenceCutoff, sendTranscript, startListening]);
 
   const logout = async () => {
     shouldAutoListenRef.current = false;
